@@ -4,10 +4,14 @@ Run on a machine with Isaac Sim installed:
 
     python standalone/example.py
 
-Produces three PNGs in the working directory:
+Produces, in the working directory:
     depth_synthetic.png   jet-colormapped distance image
-    ir_thermal.png        thermal-mode IR, ironbow (thermal-camera) palette
-    ir_active_nir.png     active-NIR-mode IR, ironbow palette
+    ir_VIS.png            visible reflectance         (400–700 nm, reflective)
+    ir_NIR_ACTIVE.png     active near-infrared        (700–1000 nm, reflective)
+    ir_SWIR_ACTIVE.png    active short-wave infrared   (1000–2500 nm, reflective)
+    ir_MWIR.png           mid-wave thermal emission    (3000–5000 nm, emissive)
+    ir_LWIR.png           long-wave thermal emission   (8000–14000 nm, emissive)
+all IR frames rendered with the ironbow (thermal-camera) palette.
 """
 
 from isaacsim import SimulationApp
@@ -60,17 +64,16 @@ img = camera.synthesize(max_distance=20.0, colormap="jet")
 Image.fromarray(img).save("depth_synthetic.png")
 print(f"Depth image saved: {img.shape} {img.dtype}")
 
-# 2) Thermal-mode IR → ironbow (thermal-camera) palette.
-#    synthesize_ir returns a float32 (H,W) map in [0,1]; colorize() maps it to
-#    a uint8 (H,W,3) RGB image for display. Keep the float map for training.
-ir_thermal = camera.synthesize_ir(mode="thermal")
-Image.fromarray(SuperCamera.colorize(ir_thermal, "ironbow")).save("ir_thermal.png")
-print(f"Thermal IR saved: {ir_thermal.shape} {ir_thermal.dtype}")
-
-# 3) Active-NIR-mode IR → ironbow palette.
-ir_nir = camera.synthesize_ir(mode="active_nir", camera_pos=np.array([0.0, -5.0, 2.0]))
-Image.fromarray(SuperCamera.colorize(ir_nir, "ironbow")).save("ir_active_nir.png")
-print(f"Active-NIR IR saved: {ir_nir.shape} {ir_nir.dtype}")
+# 2) One IR frame per spectral band → ironbow (thermal-camera) palette.
+#    synthesize_ir returns a float32 (H,W) map in [0,1]; colorize() maps it to a
+#    uint8 (H,W,3) RGB image for display. Keep the float map for training.
+#    camera_pos feeds the active illuminator used by the NIR/SWIR bands; the
+#    emissive bands (MWIR/LWIR) read ambient_temp instead.
+camera_pos = np.array([0.0, -5.0, 2.0])
+for band in ("VIS", "NIR_ACTIVE", "SWIR_ACTIVE", "MWIR", "LWIR"):
+    ir = camera.synthesize_ir(band, camera_pos=camera_pos, ambient_temp=293.0)
+    Image.fromarray(SuperCamera.colorize(ir, "ironbow")).save(f"ir_{band}.png")
+    print(f"{band:12s} IR saved: {ir.shape} {ir.dtype}")
 
 camera.destroy()
 app.close()

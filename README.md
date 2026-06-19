@@ -5,8 +5,9 @@
 Super Camera wraps the `omni.replicator.core` annotator pipeline into a single
 `SuperCamera` class. It removes the boilerplate of wiring up render products and
 annotators by hand, and turns raw render buffers (distance, normals, albedo,
-roughness, …) into **synthetic thermal / near-infrared images** rendered with a
-real thermal-camera ("ironbow") colormap.
+roughness, emissive, motion, …) into **synthetic multispectral IR images** —
+five physically-motivated spectral bands from the visible through long-wave
+infrared — rendered with a real thermal-camera ("ironbow") colormap.
 
 It ships as both an **auto-loading Isaac Sim extension** (with a GUI panel) and a
 **standalone Python library** that drops straight into a robot-learning pipeline
@@ -25,9 +26,10 @@ such as **Isaac Lab**.
 - [Gallery](#gallery)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Spectral bands](#spectral-bands)
 - [IR synthesis](#ir-synthesis)
 - [Thermal colormap](#thermal-colormap)
-- [Writing your own heuristic](#writing-your-own-heuristic)
+- [Writing your own band model](#writing-your-own-band-model)
 - [Isaac Lab / training-pipeline integration](#isaac-lab--training-pipeline-integration)
 - [GUI panel](#gui-panel)
 - [Buffer reference](#buffer-reference)
@@ -39,8 +41,10 @@ such as **Isaac Lab**.
 
 ## Features
 
-- 🌡️ **Simulated IR** — `thermal` and `active_nir` modes built purely from
-  per-buffer geometry data (no external sensor model required).
+- 🌈 **Five spectral bands** — `VIS`, `NIR_ACTIVE`, `SWIR_ACTIVE`, `MWIR`, `LWIR`,
+  each a physically-motivated model built purely from per-buffer render data (no
+  external sensor model required). Reflective bands model active/ambient
+  illumination return; emissive bands model thermal emission.
 - 🎨 **Thermal colormap** — output rendered with an **ironbow** palette that looks
   like a FLIR-style thermal camera (black → purple → red → orange → yellow → white).
 - 🧩 **One class, every buffer** — distance, depth, normals, albedo, roughness,
@@ -53,11 +57,12 @@ such as **Isaac Lab**.
 
 ## Gallery
 
-| RGB | Distance (jet) | Thermal IR (ironbow) | Active NIR (ironbow) |
-|---|---|---|---|
-| ![rgb](docs/images/rgb.png) | ![depth](docs/images/depth_jet.png) | ![thermal](docs/images/ir_thermal.png) | ![nir](docs/images/ir_active_nir.png) |
+| VIS (reflective) | NIR_ACTIVE (reflective) | SWIR_ACTIVE (reflective) | MWIR (emissive) | LWIR (emissive) |
+|---|---|---|---|---|
+| ![vis](docs/images/ir_VIS.png) | ![nir](docs/images/ir_NIR_ACTIVE.png) | ![swir](docs/images/ir_SWIR_ACTIVE.png) | ![mwir](docs/images/ir_MWIR.png) | ![lwir](docs/images/ir_LWIR.png) |
 
-> _Placeholders — drop your own renders into `docs/images/`._
+> _Placeholders — drop your own renders into `docs/images/`. All five are produced
+> by [`standalone/example.py`](standalone/example.py)._
 
 ---
 
@@ -103,35 +108,109 @@ camera = SuperCamera(
 
 camera.aim(position=(0, -5, 2), target=(0, 0, 0))   # Z-up world
 
-# Thermal IR → float32 (H, W) in [0, 1]
-ir = camera.synthesize_ir(mode="thermal")
+# Long-wave thermal IR → float32 (H, W) in [0, 1]
+ir = camera.synthesize_ir(mode="LWIR")
 
 # Colorize for display → uint8 (H, W, 3) ironbow image
 from PIL import Image
-Image.fromarray(SuperCamera.colorize(ir, "ironbow")).save("ir_thermal.png")
+Image.fromarray(SuperCamera.colorize(ir, "ironbow")).save("ir_LWIR.png")
 ```
 
 ---
 
+## Spectral bands
+
+Super Camera models **five spectral bands**, each identified by its wavelength
+range and classified as primarily **reflective** (the sensor sees illumination
+bouncing off surfaces) or **emissive** (the sensor sees thermal radiation the
+surface itself emits). The canonical definitions live in one place —
+`SPECTRAL_BANDS` in [`buffers.py`](exts/super.camera/super/camera/buffers.py) —
+and are the single source of truth read by the synthesis dispatch, the GUI, and
+this table.
+
+| Band | Wavelength | Class | Buffers used | Synthesis heuristic |
+|---|---|---|---|---|
+| **`VIS`** | 400–700 nm | reflective | distance, normals, diffuse, specular, roughness | Passive ambient reflectance: colour-aware diffuse `luma(diffuse)·(N·V)` + specular sheen `specular·(N·V)^(1/roughness)`. **No** distance falloff (no active source). |
+| **`NIR_ACTIVE`** | 700–1000 nm | reflective | distance, normals, diffuse, specular, roughness | Coaxial active illuminator (light = camera, `H = V`). Diffuse + **boosted** specular (`×2`) so smooth surfaces glint, all divided by **distance²** (inverse-square falloff). |
+| **`SWIR_ACTIVE`** | 1000–2500 nm | reflective | distance, normals, diffuse, specular, roughness | Like NIR but **colour-blind**: flat grayscale reflectance (channel mean, not luma), diffuse base modulated by `(1 − 0.5·roughness)`, even **stronger** specular (`×3`), inverse-square falloff. Emphasis on material over colour. |
+| **`MWIR`** | 3000–5000 nm | emissive | distance, normals, diffuse, specular, roughness, emissive, motion | Thermal emission `ε · T⁴`. Emissivity `ε` inferred from material (rough/diffuse → high, smooth/specular → low); temperature proxy = ambient + **strongly weighted** emissive + motion heat. The `T⁴` power **biases hard toward hot objects**. |
+| **`LWIR`** | 8000–14000 nm | emissive | distance, normals, diffuse, specular, roughness, emissive, motion | Ambient-temperature emission `ε · T · geom`. Near-**linear** in temperature (whole scene visible), emissive/motion add modest warmth, geometry only a weak influence, **no** distance falloff (emitted, not illuminated). |
+
+Introspect them in code:
+
+```python
+from super.camera import SPECTRAL_BANDS
+b = SPECTRAL_BANDS["MWIR"]
+b.name, b.wavelength_min_nm, b.wavelength_max_nm, b.reflective_vs_emissive
+# ('MWIR', 3000.0, 5000.0, 'emissive')
+```
+
+### Why split NIR/SWIR from MWIR/LWIR?
+
+The two groups are governed by **different physics**, so they read different
+buffers and use different math:
+
+- **`VIS` / `NIR_ACTIVE` / `SWIR_ACTIVE` are reflective.** What the sensor sees is
+  illumination (ambient, or an active illuminator co-located with the camera)
+  **reflected** off surfaces. Brightness is governed by **reflectivity** (albedo,
+  specular, roughness, `N·V`), and an active source obeys **inverse-square
+  distance falloff** — a far surface returns less light. Colour dependence fades
+  as wavelength grows (VIS is colour-aware, SWIR is nearly colour-blind).
+- **`MWIR` / `LWIR` are emissive.** The surface is the source: it **emits** thermal
+  radiation set by its **emissivity** and **temperature**. There is **no
+  inverse-square illumination falloff** (you are not lighting the scene), geometry
+  matters only weakly, and the signal is driven by heat (emissive materials,
+  motion-derived heating, ambient temperature). MWIR sits on the steep part of the
+  Planck curve so it favours **hot** targets (engines, exhausts); LWIR is where
+  ambient-temperature objects peak, so the **whole scene** glows and emissivity
+  contrast dominates.
+
+Mixing these into one "thermal vs not" switch would force one model to fake the
+other; separating them keeps each model physically honest.
+
+### How the bands differ, visually and physically
+
+| | What lights up | Driven by | Distance falloff |
+|---|---|---|---|
+| `VIS` | Bright, colourful, view-facing surfaces | albedo colour, `N·V` | none |
+| `NIR_ACTIVE` | Near, smooth, specular surfaces (tight glints) | reflectivity, distance² | strong |
+| `SWIR_ACTIVE` | Near, reflective **materials** (colour-agnostic) | material reflectance, distance² | strong |
+| `MWIR` | **Hot spots** only — emissive/moving objects pop | temperature (`T⁴`) | none |
+| `LWIR` | **Everything**, by emissivity; rough matte = bright | emissivity, ambient temp | none |
+
+Practically: a smooth metal plate is a bright glint in `NIR_ACTIVE`/`SWIR_ACTIVE`
+but **dark** in `LWIR` (low emissivity); a warm matte object is dim under active
+NIR but **bright** in `LWIR`; and only a genuinely hot/emissive or fast-moving
+object stands out in `MWIR`.
+
 ## IR synthesis
 
 `synthesize_ir(mode, camera_pos=None, ambient_temp=293.0)` returns a **float32
-`(H, W)` array in `[0, 1]`** built from per-buffer data. Required buffers are
-auto-attached on first call. Background / no-hit ("miss") rays are forced to `0`.
-
-| Mode | Required buffers | Model |
-|---|---|---|
-| `thermal` | `DISTANCE_TO_OBJECT`, `NORMALS` | Distance scaffold (far = bright). **This is the place to write your own heuristic** — see below. |
-| `active_nir` | `DISTANCE_TO_OBJECT`, `NORMALS`, `DIFFUSE_ALBEDO`, `SPECULAR_ALBEDO`, `ROUGHNESS` | Coaxial active-NIR illuminator: PBR reflectivity + Blinn-Phong specular + inverse-square falloff. |
+`(H, W)` array in `[0, 1]`** built from per-buffer data. `mode` is a band name
+(case-insensitive). Required buffers are auto-attached on first call. Background /
+no-hit ("miss") rays are forced to `0`.
 
 ```python
-ir = camera.synthesize_ir(mode="thermal")
-ir = camera.synthesize_ir(mode="active_nir", camera_pos=np.array([0, 0, 5]))
+ir = camera.synthesize_ir("LWIR")                                  # thermal
+ir = camera.synthesize_ir("MWIR", ambient_temp=300.0)              # hot-biased thermal
+ir = camera.synthesize_ir("NIR_ACTIVE", camera_pos=np.array([0, 0, 5]))   # active reflective
+ir = camera.synthesize_ir("VIS")                                   # visible reflectance
 ```
+
+- `camera_pos` feeds the active illuminator / view vector used by the reflective
+  bands (only used when `POINTCLOUD` is attached; otherwise a `+Z` fallback view
+  vector is used).
+- `ambient_temp` (Kelvin) sets the baseline temperature for the **emissive** bands
+  (`MWIR`, `LWIR`); it is ignored by the reflective bands.
 
 The output is already normalized to `[0, 1]` (divided by its own max) and has **no
 noise** — display or save it directly. Keep the raw float map for training; only
 colorize when you want to look at it.
+
+> **Deprecated aliases.** The old mode names still work for backward compatibility
+> but are deprecated and print a one-time notice:
+> `mode="thermal"` → **`LWIR`**, `mode="active_nir"` → **`NIR_ACTIVE`**. Use the
+> canonical band names in new code.
 
 ## Thermal colormap
 
@@ -149,28 +228,39 @@ The **ironbow** palette is defined by a small table of control stops in
 — edit the stops to retune the look, or add a new branch in `colorize()` for
 another palette.
 
-## Writing your own heuristic
+## Writing your own band model
 
-`thermal` mode is intentionally a thin scaffold: the base on which you layer your
-own per-pixel IR model. The hook is the `else` branch of `_compute_ir()` in
-[`super_camera.py`](exts/super.camera/super/camera/super_camera.py), which carries
-a full inline comment listing **every buffer you can access at that point**, its
-shape and dtype, and how to attach the optional ones.
+Each band is a small, self-contained method on `SuperCamera` — `_synth_vis`,
+`_synth_nir_active`, `_synth_swir_active`, `_synth_mwir`, `_synth_lwir` in
+[`super_camera.py`](exts/super.camera/super/camera/super_camera.py). They all
+receive the sanitized per-pixel buffer dict `bufs` (keyed by `BufferType.name`,
+already NaN/Inf-scrubbed) plus the precomputed `dot_n_v` (clamped `N·V`), and
+each returns a non-negative `(H, W)` intensity map. The shared tail of
+`_compute_ir()` then masks miss rays and normalizes to `[0, 1]`, so you only worry
+about the physics.
 
-You only need to produce a non-negative `(H, W)` `ir_intensity` array — the shared
-tail masks miss rays and normalizes to `[0, 1]` for you:
+**Retune a band** — edit its `_synth_*` method, or the tuning constants near the
+top of the file (`_NIR_SPECULAR_GAIN`, `_MWIR_EMISSIVE_GAIN`,
+`_LWIR_GEOMETRY_WEIGHT`, …). Shared material helpers (`_luma`, `_gray`,
+`_emissivity`, `_emissive_heat`, `_motion_heat`) are reusable building blocks.
+
+**Add a band** — three steps:
+
+1. Add a `SpectralBand` entry to `SPECTRAL_BANDS` in `buffers.py` (name, wavelength
+   range, reflective/emissive class, description).
+2. Register the buffers it needs in `_BAND_BUFFERS` in `super_camera.py`.
+3. Add a `_synth_<band>` method and a branch in the `_compute_ir` dispatcher.
 
 ```python
-# inside the `else:` (thermal) branch of _compute_ir — replace this one line:
-ir_intensity = np.where(background, 0.0, bufs["DISTANCE_TO_OBJECT"])
-
-# e.g. emissive-driven heat (add BufferType.EMISSIVE to _THERMAL_BUFFERS first):
-# ir_intensity = np.mean(bufs["EMISSIVE"][:, :, :3], axis=2)
+def _synth_myband(self, bufs, dot_n_v):
+    # produce any non-negative (H, W) array from the buffers you registered
+    return np.mean(bufs["EMISSIVE"][:, :, :3], axis=2) * dot_n_v
 ```
 
-To make more buffers available to your heuristic, add them to `_THERMAL_BUFFERS`
-at the top of `super_camera.py`, or call `camera.add_buffer(BufferType.X)` before
-synthesizing.
+The buffers available to a model are exactly the ones registered for that band in
+`_BAND_BUFFERS`; `DISTANCE_TO_OBJECT` and `NORMALS` are always present. Guard
+optional ones (e.g. `EMISSIVE`, which is unregistered in some builds) with
+`if "EMISSIVE" in bufs`.
 
 ## Isaac Lab / training-pipeline integration
 
@@ -179,16 +269,22 @@ Inside such a loop, **do not** let Super Camera call `rep.orchestrator.step()` �
 use the no-step read path instead:
 
 ```python
+# In the no-step read() path, attach the band's buffers up front so they are
+# rendered before the first read (LWIR needs the emissive/material set).
 camera = SuperCamera(
     prim_path="/World/SuperCamera",
     resolution=(640, 480),
-    buffers=[BufferType.DISTANCE_TO_OBJECT, BufferType.NORMALS],
+    buffers=[
+        BufferType.DISTANCE_TO_OBJECT, BufferType.NORMALS,
+        BufferType.DIFFUSE_ALBEDO, BufferType.SPECULAR_ALBEDO, BufferType.ROUGHNESS,
+        BufferType.EMISSIVE, BufferType.MOTION_VECTORS,
+    ],
 )
 camera.aim(position=(3, 0, 2), target=(0, 0, 0.5))
 
 for step in range(num_steps):
-    sim.step(render=True)                              # Isaac Lab renders
-    ir = camera.synthesize_ir_from_render("thermal")   # reads the rendered frame, no extra step
+    sim.step(render=True)                            # Isaac Lab renders
+    ir = camera.synthesize_ir_from_render("LWIR")    # reads the rendered frame, no extra step
     # ...feed `ir` into an observation / reward term...
 ```
 
@@ -216,7 +312,7 @@ When the extension loads, a **Super Camera** window appears automatically.
 | Section | Controls |
 |---|---|
 | Camera Setup | Prim Path, Width × Height, **Create Camera**, **Open Viewport** |
-| IR Mode | Mode dropdown (Thermal LWIR / Active NIR); relevant fields enabled |
+| Spectral Band | Band dropdown (`VIS` / `NIR_ACTIVE` / `SWIR_ACTIVE` / `MWIR` / `LWIR`) with a live wavelength + reflective/emissive description; Ambient Temp enabled for emissive bands, Camera Position for active bands |
 | IR Preview | Live ironbow thumbnail updated after each capture |
 | Output | Save Path for the PNG |
 | Buttons | **Capture IR Frame**, **Reset Camera** |
@@ -266,7 +362,7 @@ shape. Useful for CI and logic iteration. Auto-enabled if
 
 ```python
 camera = SuperCamera(mock=True, buffers=[BufferType.DISTANCE_TO_OBJECT])
-ir = camera.synthesize_ir(mode="thermal")
+ir = camera.synthesize_ir("LWIR")
 rgb = SuperCamera.colorize(ir, "ironbow")
 ```
 

@@ -39,10 +39,21 @@ def main():
 
     # SuperCamera attaches a standalone render product to the camera prim. It does
     # NOT touch the active viewport, so it is safe alongside Isaac Lab sensors.
+    # In the no-step read() path the required buffers must be attached up front so
+    # they are rendered before the first read — construct with the band's full set
+    # (LWIR here: emissivity + ambient + emissive/motion heat proxies).
     camera = SuperCamera(
         prim_path="/World/SuperCamera",
         resolution=(640, 480),
-        buffers=[BufferType.DISTANCE_TO_OBJECT, BufferType.NORMALS],
+        buffers=[
+            BufferType.DISTANCE_TO_OBJECT,
+            BufferType.NORMALS,
+            BufferType.DIFFUSE_ALBEDO,
+            BufferType.SPECULAR_ALBEDO,
+            BufferType.ROUGHNESS,
+            BufferType.EMISSIVE,
+            BufferType.MOTION_VECTORS,
+        ],
     )
     camera.aim(position=(3.0, 0.0, 2.0), target=(0.0, 0.0, 0.5))
 
@@ -53,7 +64,7 @@ def main():
         sim.step(render=True)
 
         # Read the frame the app just rendered (no orchestrator.step()).
-        ir = camera.synthesize_ir_from_render(mode="thermal")  # float32 (H,W) in [0,1]
+        ir = camera.synthesize_ir_from_render(mode="LWIR")  # float32 (H,W) in [0,1]
 
         # Feed `ir` straight into an observation buffer, reward term, etc.
         # Convert to an RGB thermal image only when you want to look at it:

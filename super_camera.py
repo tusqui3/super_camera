@@ -4,6 +4,7 @@ import numpy as np
 
 from .buffers import (
     BufferType, BufferData, ANNOTATOR_MAP, STRUCTURED_BUFFERS, MOCK_SHAPES,
+    SPECTRAL_BANDS, DEPRECATED_BAND_ALIASES,
 )
 
 _WARMUP_STEPS = 16
@@ -46,7 +47,13 @@ def _ironbow_colormap(norm: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1).astype(np.uint8)
 
 
-_NIR_BUFFERS: List[BufferType] = [
+# Buffers each spectral band needs attached before synthesis. Reflective bands
+# (VIS / NIR_ACTIVE / SWIR_ACTIVE) need the PBR appearance set; emissive bands
+# (MWIR / LWIR) additionally need EMISSIVE + MOTION_VECTORS for the heat proxies.
+# DISTANCE_TO_OBJECT and NORMALS are required by every band (background mask and
+# N·V). EMISSIVE may be unregistered in some builds — _attach() skips it and the
+# emissive models guard with `if "EMISSIVE" in bufs`.
+_REFLECTIVE_BUFFERS: List[BufferType] = [
     BufferType.DISTANCE_TO_OBJECT,
     BufferType.NORMALS,
     BufferType.DIFFUSE_ALBEDO,
@@ -54,10 +61,58 @@ _NIR_BUFFERS: List[BufferType] = [
     BufferType.ROUGHNESS,
 ]
 
-_THERMAL_BUFFERS: List[BufferType] = [
-    BufferType.DISTANCE_TO_OBJECT,
-    BufferType.NORMALS,
+_EMISSIVE_BUFFERS: List[BufferType] = _REFLECTIVE_BUFFERS + [
+    BufferType.EMISSIVE,
+    BufferType.MOTION_VECTORS,
 ]
+
+_BAND_BUFFERS: Dict[str, List[BufferType]] = {
+    "VIS": _REFLECTIVE_BUFFERS,
+    "NIR_ACTIVE": _REFLECTIVE_BUFFERS,
+    "SWIR_ACTIVE": _REFLECTIVE_BUFFERS,
+    "MWIR": _EMISSIVE_BUFFERS,
+    "LWIR": _EMISSIVE_BUFFERS,
+}
+
+# ── IR band-model tuning constants ───────────────────────────────────────────
+# These set the relative weighting between terms; absolute scale is irrelevant
+# because _compute_ir normalizes the final frame by its own max.
+_AMBIENT_REF_K = 293.0          # reference ambient temperature (K) → proxy 1.0
+_NIR_SPECULAR_GAIN = 2.0        # active-NIR specular boost over passive VIS
+_SWIR_SPECULAR_GAIN = 3.0       # active-SWIR specular boost (material emphasis)
+_MOTION_SCALE = 8.0             # screen-space motion (px) at which heat saturates
+_MWIR_EMISSIVE_GAIN = 4.0       # MWIR weight on emissive-material heat
+_MWIR_MOTION_GAIN = 2.0         # MWIR weight on motion-derived heat
+_LWIR_EMISSIVE_GAIN = 1.0       # LWIR weight on emissive-material heat
+_LWIR_MOTION_GAIN = 0.5         # LWIR weight on motion-derived heat
+_LWIR_GEOMETRY_WEIGHT = 0.15    # LWIR weak geometry (N·V) influence
+
+_DEPRECATION_NOTIFIED: set = set()
+
+
+def _resolve_band(mode: str) -> str:
+    """Resolve a mode string to a canonical band name in SPECTRAL_BANDS.
+
+    Accepts canonical names (case-insensitive) and the deprecated aliases
+    `thermal` → LWIR and `active_nir` → NIR_ACTIVE (with a one-time notice).
+    """
+    if not isinstance(mode, str):
+        raise ValueError(f"IR mode must be a band-name string, got {type(mode).__name__}")
+    key = mode.strip()
+    if key in SPECTRAL_BANDS:
+        return key
+    if key.upper() in SPECTRAL_BANDS:
+        return key.upper()
+    alias = DEPRECATED_BAND_ALIASES.get(key.lower())
+    if alias is not None:
+        if key.lower() not in _DEPRECATION_NOTIFIED:
+            _DEPRECATION_NOTIFIED.add(key.lower())
+            print(f"[super.camera] IR mode '{mode}' is deprecated; mapping to '{alias}'. "
+                  f"Use the canonical band name instead.")
+        return alias
+    valid = ", ".join(SPECTRAL_BANDS)
+    aliases = ", ".join(DEPRECATED_BAND_ALIASES)
+    raise ValueError(f"Unknown IR band '{mode}'. Valid bands: {valid}. Deprecated aliases: {aliases}.")
 
 
 class SuperCamera:
@@ -215,18 +270,18 @@ class SuperCamera:
 
     def synthesize_ir_from_render(
         self,
-        mode: str = "thermal",
+        mode: str = "LWIR",
         camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
         # Like synthesize_ir(), but reads the already-rendered frame via read()
         # instead of stepping the orchestrator. Required buffers must already be
         # attached (pass them to buffers= at construction or call add_buffer()).
-        required = _NIR_BUFFERS if mode == "active_nir" else _THERMAL_BUFFERS
-        for bt in required:
+        band = _resolve_band(mode)
+        for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = self.read()
-        return self._compute_ir(captured, mode, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, camera_pos, ambient_temp)
 
     def get_buffer(self, buffer_type: BufferType) -> BufferData:
         if not self._mock and buffer_type not in self._annotators:
@@ -271,27 +326,27 @@ class SuperCamera:
 
     def synthesize_ir(
         self,
-        mode: str = "thermal",
+        mode: str = "LWIR",
         camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
-        required = _NIR_BUFFERS if mode == "active_nir" else _THERMAL_BUFFERS
-        for bt in required:
+        band = _resolve_band(mode)
+        for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = self.capture()
-        return self._compute_ir(captured, mode, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, camera_pos, ambient_temp)
 
     async def synthesize_ir_async(
         self,
-        mode: str = "thermal",
+        mode: str = "LWIR",
         camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
-        required = _NIR_BUFFERS if mode == "active_nir" else _THERMAL_BUFFERS
-        for bt in required:
+        band = _resolve_band(mode)
+        for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = await self.capture_async()
-        return self._compute_ir(captured, mode, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, camera_pos, ambient_temp)
 
     def _compute_ir(
         self,
@@ -300,6 +355,9 @@ class SuperCamera:
         camera_pos: Optional[np.ndarray],
         ambient_temp: float,
     ) -> np.ndarray:
+        # Resolve defensively so a direct _compute_ir() call (or an alias) still
+        # selects the right band; the public callers already pass a canonical name.
+        band = _resolve_band(mode)
         bufs = {bt.name: captured[bt].data for bt in captured}
 
         H, W = bufs["DISTANCE_TO_OBJECT"].shape
@@ -324,77 +382,23 @@ class SuperCamera:
 
         dot_n_v = np.clip(np.sum(normals * view_vec, axis=2), 0.0, 1.0)
 
-        if mode == "active_nir":
-            diffuse = bufs["DIFFUSE_ALBEDO"]
-            diffuse_gray = 0.299 * diffuse[:, :, 0] + 0.587 * diffuse[:, :, 1] + 0.114 * diffuse[:, :, 2]
-            specular_gray = np.mean(bufs["SPECULAR_ALBEDO"][:, :, :3], axis=2)
-            roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
-            specular_component = specular_gray * (dot_n_v ** (1.0 / roughness))
-            reflection = diffuse_gray * dot_n_v + specular_component
-            distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)
-            ir_intensity = reflection / (distance ** 2)
-        else:
-            # ════════════════════════════════════════════════════════════════
-            #  THERMAL MODE — WRITE YOUR OWN PER-BUFFER HEURISTIC HERE
-            # ════════════════════════════════════════════════════════════════
-            #
-            #  `bufs` is a dict keyed by BufferType.name (a string) holding the
-            #  raw per-pixel render data for this frame. Build whatever function
-            #  of these arrays you like and assign the result to `ir_intensity`
-            #  (a float (H, W) array). The shared tail below then:
-            #    • forces miss/background pixels to 0 via `background`, and
-            #    • normalizes the whole frame to [0, 1] by dividing by its max.
-            #  So you only need to produce a non-negative (H, W) intensity map;
-            #  scaling and miss-masking are handled for you.
-            #
-            #  ── WHICH BUFFERS ARE PRESENT ───────────────────────────────────
-            #  Only ATTACHED buffers appear in `bufs`. Thermal mode attaches the
-            #  set in _THERMAL_BUFFERS (DISTANCE_TO_OBJECT, NORMALS). To use any
-            #  other buffer below, either add it to _THERMAL_BUFFERS at the top
-            #  of this file, or call camera.add_buffer(BufferType.X) before
-            #  synthesizing. Guard optional ones with e.g. `if "EMISSIVE" in bufs`.
-            #  Every floating-point buffer here has already been run through
-            #  np.nan_to_num (NaN/Inf → 0), so it is safe to do math on.
-            #
-            #  ── PIXEL BUFFERS (np.ndarray) — directly usable in the math ─────
-            #   bufs["DISTANCE_TO_OBJECT"]  (H,W)   float32  Euclidean dist to surface, metres (miss = inf → see `background`)
-            #   bufs["DEPTH"]               (H,W)   float32  Orthogonal/z-buffer depth to image plane, metres
-            #   bufs["NORMALS"]             (H,W,4) float32  World-space surface normal XYZ (+ unused W); `normals` above is the unit XYZ
-            #   bufs["RGB"]                 (H,W,4) uint8    Rendered colour RGBA
-            #   bufs["DIFFUSE_ALBEDO"]      (H,W,4) float32  PBR diffuse/base colour RGBA
-            #   bufs["SPECULAR_ALBEDO"]     (H,W,4) float32  PBR specular colour RGBA
-            #   bufs["ROUGHNESS"]           (H,W)   float32  PBR roughness scalar [0,1]
-            #   bufs["EMISSIVE"]            (H,W,4) float32  Emissive colour RGBA (self-lit materials — natural heat proxy)
-            #   bufs["MOTION_VECTORS"]      (H,W,4) float32  Screen-space optical flow (friction/motion-heat proxy)
-            #
-            #  ── DERIVED VALUES ALREADY COMPUTED ABOVE (reuse freely) ─────────
-            #   normals    (H,W,3) float32  unit world-space normal
-            #   view_vec   (H,W,3) float32  unit camera→surface view direction
-            #   dot_n_v    (H,W)   float32  clamped N·V (1 = facing camera, 0 = grazing)
-            #   background (H,W)   bool     True where the ray missed all geometry
-            #
-            #  ── STRUCTURED BUFFERS (dicts / structured arrays, NOT pixel maps) ─
-            #  These are NOT in `bufs` as plain images; access them with
-            #  self.get_buffer(BufferType.X).data / .metadata if you attach them:
-            #   SEMANTIC       (H,W) uint32  per-pixel class id  (metadata: idToLabels)
-            #   INSTANCE       (H,W) uint32  hierarchical instance id
-            #   INSTANCE_ID    (H,W) uint32  per-leaf-prim instance id
-            #   OCCLUSION              per-instance occlusion ratio
-            #   BBOX_2D_TIGHT          tight 2-D boxes (pixel coords)
-            #   BBOX_2D_LOOSE          loose 2-D boxes (pixel coords)
-            #   BBOX_3D                3-D oriented boxes + world pose
-            #   CAMERA_PARAMS          intrinsics/extrinsics dict
-            #   POINTCLOUD     (N,3) float32  world-space hit points
-            #   SKELETON               character joint positions
-            #
-            #  Example heuristics you might write instead of the line below:
-            #   • emissive heat:   ir_intensity = np.mean(bufs["EMISSIVE"][:,:,:3], axis=2)
-            #   • class-based:     ir_intensity = np.where(sem == HUMAN_ID, 1.0, 0.2)
-            #   • view-warmed:     ir_intensity = dot_n_v / np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, None)
-            #
-            #  CURRENT (default) BEHAVIOUR — distance scaffold: far = bright.
-            #  Replace the next line with your heuristic; keep the result (H,W) ≥ 0.
-            ir_intensity = np.where(background, 0.0, bufs["DISTANCE_TO_OBJECT"])
+        # ── Per-band synthesis ───────────────────────────────────────────────
+        # Each model below consumes `bufs` (raw per-pixel buffers, keyed by
+        # BufferType.name and already NaN/Inf-sanitized) plus the derived
+        # `dot_n_v` (clamped N·V) and returns a non-negative (H, W) intensity
+        # map. The shared tail then forces miss/background pixels to 0 and
+        # normalizes the frame to [0, 1]. See each _synth_* method for the
+        # physical model and the buffers it reads.
+        if band == "VIS":
+            ir_intensity = self._synth_vis(bufs, dot_n_v)
+        elif band == "NIR_ACTIVE":
+            ir_intensity = self._synth_nir_active(bufs, dot_n_v)
+        elif band == "SWIR_ACTIVE":
+            ir_intensity = self._synth_swir_active(bufs, dot_n_v)
+        elif band == "MWIR":
+            ir_intensity = self._synth_mwir(bufs, ambient_temp)
+        else:  # LWIR
+            ir_intensity = self._synth_lwir(bufs, dot_n_v, ambient_temp)
 
         out = np.maximum(ir_intensity, 0.0).astype(np.float32)
         out[background] = 0.0
@@ -403,6 +407,122 @@ class SuperCamera:
             out = out / omax
 
         return out
+
+    # ── Shared appearance / material helpers ────────────────────────────────
+    # `bufs` here is the sanitized per-pixel buffer dict from _compute_ir.
+    #   bufs["DISTANCE_TO_OBJECT"] (H,W)   float32  Euclidean dist, metres
+    #   bufs["NORMALS"]            (H,W,4) float32  world-space normal XYZ + pad
+    #   bufs["DIFFUSE_ALBEDO"]     (H,W,4) float32  PBR diffuse/base colour RGBA
+    #   bufs["SPECULAR_ALBEDO"]    (H,W,4) float32  PBR specular colour RGBA
+    #   bufs["ROUGHNESS"]          (H,W)   float32  PBR roughness [0,1]
+    #   bufs["EMISSIVE"]           (H,W,4) float32  emissive colour RGBA (optional)
+    #   bufs["MOTION_VECTORS"]     (H,W,4) float32  screen-space optical flow (optional)
+    # To add a band, append a model below, register its buffers in _BAND_BUFFERS,
+    # and add the SpectralBand entry in buffers.py.
+
+    @staticmethod
+    def _luma(rgba: np.ndarray) -> np.ndarray:
+        # BT.601 perceptual luma — colour-aware grayscale.
+        return 0.299 * rgba[:, :, 0] + 0.587 * rgba[:, :, 1] + 0.114 * rgba[:, :, 2]
+
+    @staticmethod
+    def _gray(rgba: np.ndarray) -> np.ndarray:
+        # Flat, colour-agnostic grayscale (channel mean).
+        return np.mean(rgba[:, :, :3], axis=2)
+
+    @staticmethod
+    def _emissivity(bufs: Dict[str, np.ndarray]) -> np.ndarray:
+        # Infer emissivity from PBR material: rough, diffuse (dielectric) surfaces
+        # emit efficiently (ε → 1); smooth, specular (metallic) surfaces emit
+        # poorly (ε → 0). Used by the emissive thermal bands.
+        roughness = np.clip(bufs["ROUGHNESS"], 0.0, 1.0)
+        specular_gray = np.clip(SuperCamera._gray(bufs["SPECULAR_ALBEDO"]), 0.0, 1.0)
+        return np.clip(0.5 + 0.5 * roughness - 0.4 * specular_gray, 0.05, 1.0)
+
+    @staticmethod
+    def _emissive_heat(bufs: Dict[str, np.ndarray]) -> Any:
+        # Self-lit / hot materials act as a heat source. 0 when EMISSIVE is
+        # unattached or unregistered in this build.
+        if "EMISSIVE" in bufs:
+            return SuperCamera._gray(bufs["EMISSIVE"])
+        return 0.0
+
+    @staticmethod
+    def _motion_heat(bufs: Dict[str, np.ndarray]) -> Any:
+        # Screen-space motion magnitude as a friction/heating proxy, saturating
+        # at _MOTION_SCALE px → [0, 1]. 0 when MOTION_VECTORS is unattached.
+        if "MOTION_VECTORS" in bufs:
+            mag = np.linalg.norm(bufs["MOTION_VECTORS"][:, :, :2], axis=2)
+            return np.clip(mag / _MOTION_SCALE, 0.0, 1.0)
+        return 0.0
+
+    # ── Per-band synthesis models ───────────────────────────────────────────
+
+    def _synth_vis(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray) -> np.ndarray:
+        # VIS (400–700 nm, reflective). Passive ambient reflectance: colour-aware
+        # diffuse Lambertian term + a specular sheen whose tightness grows as the
+        # surface smooths (shininess = 1/roughness). No active illuminator, so no
+        # inverse-square distance falloff.
+        diffuse_gray = self._luma(bufs["DIFFUSE_ALBEDO"])
+        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
+        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        specular = specular_gray * (dot_n_v ** (1.0 / roughness))
+        return diffuse_gray * dot_n_v + specular
+
+    def _synth_nir_active(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray) -> np.ndarray:
+        # NIR_ACTIVE (700–1000 nm, reflective). Coaxial active illuminator (light
+        # source = camera, so H = V and N·H = N·V). Diffuse reflectance plus a
+        # specular term boosted above VIS so smooth, low-roughness surfaces give
+        # concentrated glints; inverse-square distance attenuation for the active
+        # source.
+        diffuse_gray = self._luma(bufs["DIFFUSE_ALBEDO"])
+        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
+        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        specular = _NIR_SPECULAR_GAIN * specular_gray * (dot_n_v ** (1.0 / roughness))
+        reflection = diffuse_gray * dot_n_v + specular
+        distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)
+        return reflection / (distance ** 2)
+
+    def _synth_swir_active(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray) -> np.ndarray:
+        # SWIR_ACTIVE (1000–2500 nm, reflective). Like NIR_ACTIVE but largely
+        # colour-blind: flat grayscale reflectance (channel mean, not luma) with
+        # greater emphasis on material reflectance — a stronger specular term and
+        # a diffuse base modulated by surface smoothness (1 - roughness). Active
+        # source → inverse-square distance attenuation.
+        reflect_gray = self._gray(bufs["DIFFUSE_ALBEDO"])
+        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
+        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        specular = _SWIR_SPECULAR_GAIN * specular_gray * (dot_n_v ** (1.0 / roughness))
+        reflection = reflect_gray * dot_n_v * (1.0 - 0.5 * roughness) + specular
+        distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)
+        return reflection / (distance ** 2)
+
+    def _synth_mwir(self, bufs: Dict[str, np.ndarray], ambient_temp: float) -> np.ndarray:
+        # MWIR (3000–5000 nm, emissive). Thermal emission with a steep response.
+        # Radiance ≈ emissivity · T_proxy^4 where the temperature proxy is the
+        # ambient baseline plus strongly-weighted emissive-material and motion
+        # heat. The T^4 power biases hard toward the hottest objects (engines,
+        # exhausts) — cool ambient surfaces stay dim. Emission is ~isotropic, so
+        # (unlike LWIR) there is no geometry term at all.
+        emissivity = self._emissivity(bufs)
+        ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
+        temp = ambient + _MWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
+            + _MWIR_MOTION_GAIN * self._motion_heat(bufs)
+        return emissivity * (temp ** 4)
+
+    def _synth_lwir(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray, ambient_temp: float) -> np.ndarray:
+        # LWIR (8000–14000 nm, emissive). Ambient-temperature thermal emission:
+        # every surface radiates at ~ambient, brightness set by emissivity, with
+        # emissive-material and motion heat adding modest warmth. Near-linear in
+        # temperature (so the whole scene is visible, not just hot spots),
+        # geometry has only a weak influence, and there is NO inverse-square
+        # falloff because this is emitted — not actively illuminated — radiation.
+        emissivity = self._emissivity(bufs)
+        ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
+        temp = ambient + _LWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
+            + _LWIR_MOTION_GAIN * self._motion_heat(bufs)
+        geometry = (1.0 - _LWIR_GEOMETRY_WEIGHT) + _LWIR_GEOMETRY_WEIGHT * dot_n_v
+        return emissivity * temp * geometry
 
     @staticmethod
     def to_display(ir: np.ndarray, low_pct: float = 2.0, high_pct: float = 98.0) -> np.ndarray:

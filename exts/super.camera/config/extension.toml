@@ -14,6 +14,7 @@ preview_image = "data/preview.png"
 "omni.replicator.core" = {}
 "omni.isaac.sensor" = {}
 "omni.syntheticdata" = {}
+"omni.kit.viewport.utility" = {}
 
 [[python.module]]
 name = "super.camera"

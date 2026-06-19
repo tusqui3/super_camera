@@ -72,7 +72,7 @@ A colormap is a **fixed LUT**, not AGC — it does not reintroduce the percentil
 
 **Buffers per band** (`_BAND_BUFFERS` in `super_camera.py`): reflective bands (`VIS`/`NIR_ACTIVE`/`SWIR_ACTIVE`) use `_REFLECTIVE_BUFFERS` = `DISTANCE_TO_OBJECT, NORMALS, DIFFUSE_ALBEDO, SPECULAR_ALBEDO, ROUGHNESS`. Emissive bands (`MWIR`/`LWIR`) use `_EMISSIVE_BUFFERS` = the reflective set **+** `EMISSIVE, MOTION_VECTORS`. `EMISSIVE` may be unregistered in some builds — `_attach()` skips it and the emissive models guard with `if "EMISSIVE" in bufs`.
 
-**`ambient_temp`** (Kelvin) is now **used** by the emissive bands (`MWIR`/`LWIR`) as the baseline temperature proxy (`ambient_temp / _AMBIENT_REF_K`, ref 293 K). It is ignored by the reflective bands. **`camera_pos`** feeds the view vector for the reflective bands (only when `POINTCLOUD` is attached — see below).
+**`ambient_temp`** (Kelvin) is now **used** by the emissive bands (`MWIR`/`LWIR`) as the baseline temperature proxy (`ambient_temp / _AMBIENT_REF_K`, ref 293 K). It is ignored by the reflective bands. **`camera_pos`** is the world-space illuminator / viewpoint origin for the active reflective bands; `_view_vectors()` reconstructs a per-pixel world position and points the view vector from each surface toward it (see "View-vector reconstruction" below).
 
 ```python
 ir = camera.synthesize_ir("LWIR")                                    # thermal, ambient-dominated
@@ -83,7 +83,7 @@ ir = camera.synthesize_ir("VIS")                                     # passive v
 
 ### Architecture: dispatch + per-band models
 
-`_compute_ir` computes the shared per-pixel terms once — `background`, NaN/Inf sanitization of every float buffer, the unit `normals`, the `view_vec` (from `camera_pos` + `POINTCLOUD`, else `+Z` fallback), and `dot_n_v` (clamped `N·V`) — then **dispatches by band** to a `_synth_<band>(...)` method. Each model returns a non-negative `(H,W)` map; the shared tail forces `background` → 0 and normalizes to `[0,1]`. **Edit a band by editing its `_synth_*` method**; tune cross-band weighting via the `_*_GAIN` / `_*_WEIGHT` constants near the top of the file. Shared building blocks: `_luma` (BT.601), `_gray` (flat channel mean), `_emissivity`, `_emissive_heat`, `_motion_heat`. To add a band: add a `SpectralBand` to `SPECTRAL_BANDS`, register buffers in `_BAND_BUFFERS`, add a `_synth_*` method + a dispatcher branch.
+`_compute_ir` computes the shared per-pixel terms once — `background`, NaN/Inf sanitization of every float buffer, the unit `normals`, the `view_vec` (from `_view_vectors()`, see below), and `dot_n_v` (clamped `N·V`) — then **dispatches by band** to a `_synth_<band>(...)` method. Each model returns a non-negative `(H,W)` map; the shared tail forces `background` → 0 and normalizes to `[0,1]`. **Edit a band by editing its `_synth_*` method**; tune cross-band weighting via the `_*_GAIN` / `_*_WEIGHT` constants near the top of the file. Shared building blocks: `_luma` (BT.601), `_gray` (flat channel mean), `_emissivity`, `_emissive_heat`, `_motion_heat`. To add a band: add a `SpectralBand` to `SPECTRAL_BANDS`, register buffers in `_BAND_BUFFERS`, add a `_synth_*` method + a dispatcher branch.
 
 ### Reflective bands (illumination return)
 
@@ -108,7 +108,15 @@ Different physics → different buffers and math. Reflective bands see **illumin
 - **Why no `to_display` in the GUI:** the renderer's `distance_to_camera` buffer carries tiny per-pixel variation. `to_display`'s percentile stretch zooms into the local min↔max of whatever is in frame, so over a near-flat region it amplified that micro-variation to full-scale **TV static**. That percentile AGC was the noise source even after the explicit Gaussian noise was removed. Showing the already-normalized `[0,1]` output directly keeps a flat surface flat.
 - `SuperCamera.to_display(ir, low_pct=2, high_pct=98)` (percentile stretch) still exists for anyone who *wants* AGC downstream, but it is **no longer used by the GUI**. Do not reintroduce it into the capture path — it is what produced the static.
 
-`camera_pos` is only used when `POINTCLOUD` is available as an `(H, W, 3)` array. Otherwise a `+Z` fallback view vector is used (camera looks along world +Z).
+### View-vector reconstruction (`camera_pos`)
+
+`_view_vectors(distance, camera_pos, H, W)` produces the unit world-space view direction (surface → `camera_pos`) that feeds `dot_n_v`. When `camera_pos` is given, `_reconstruct_world_pos()` rebuilds per-pixel world positions from the `distance_to_camera` buffer + the camera prim's USD pose and pinhole intrinsics, then `view_vec = camera_pos − world_pos`. The reconstruction:
+
+- Reads the camera prim's **local-to-world transform** via `UsdGeom.Xformable.ComputeLocalToWorldTransform` and its **focal length / aperture** via `UsdGeom.Camera` — **stable USD APIs only**, no `omni.isaac.sensor.Camera`, so it stays viewport-safe.
+- Builds camera-space pinhole rays (`u`/`v` across the apertures, local `−Z` forward), rotates them to world by the matrix's 3×3 (row-vector convention: `v_world = v_local · M`), and scales by Euclidean `distance`.
+- **Falls back to the fixed `+Z` view vector** when `camera_pos is None`, in mock mode, or if the prim / intrinsics are unavailable — so it never crashes, it just reverts to the old behaviour.
+
+Convention caveat: assumes a standard USD camera (looks down local `−Z`, `+X` right, `+Y` up, image row 0 = top). If active-band shading looks mirrored, flip the `u`/`v` sign in `_reconstruct_world_pos`. Since `distance` was already `nan_to_num`'d, background pixels reconstruct at the camera origin (distance 0) and are masked out of the output anyway.
 
 ## Capture pipeline & runtime rules
 
@@ -153,7 +161,9 @@ External events (opening a viewport, stage edits) can reset the SyntheticData pi
 
 ### Unregistered annotators
 
-Not every annotator name exists in every Isaac Sim build. `emissive` in particular is **not registered** in some 4.x builds. `_attach()` catches `AnnotatorRegistry.get_annotator` failures, prints a `[super.camera] annotator '<name>' not registered, skipping` line, and continues — the buffer is simply omitted. The emissive bands (`MWIR`/`LWIR`) tolerate a missing `EMISSIVE` (`_emissive_heat()` returns `0` when it is absent, guarded by `if "EMISSIVE" in bufs`), so synthesis still works without it — the band just loses its emissive-material heat term. If your build exposes emissive under a different string, find it in the annotator list printed by the original error and update `BufferType.EMISSIVE`'s value in `buffers.py` (sync both copies).
+Not every annotator name exists in every Isaac Sim build. `emissive`, and in some builds the PBR material AOVs `roughness` / `diffuse_albedo` / `specular_albedo`, are **not registered**. `_attach()` catches `AnnotatorRegistry.get_annotator` failures, prints a `[super.camera] annotator '<name>' not registered, skipping` line, and continues — the buffer is simply omitted from `self.buffers` and never reaches `bufs`.
+
+**All material buffers are accessed through guarded helpers** so a missing AOV degrades gracefully instead of raising `KeyError` during synthesis: `_diffuse_gray()` → mid-gray `0.5`, `_specular_gray()` → `0.0` (no highlights), `_roughness()` → `0.5`, `_emissive_heat()` / `_motion_heat()` → `0.0`. A band whose material AOV is unavailable falls back to plain `N·V` shading (reflective) or uniform emissivity (emissive) rather than crashing. (Symptom this fixed: `Capture failed: 'ROUGHNESS'` — a `KeyError` from a synth model reading `bufs["ROUGHNESS"]` when the `roughness` annotator wasn't registered.) If your build exposes one of these under a different string, find the real name in the annotator list printed by the original `[super.camera] annotator '<name>' not registered` line and update that `BufferType`'s value in `buffers.py` (sync both copies).
 
 ## Buffer reference
 

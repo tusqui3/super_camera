@@ -85,6 +85,95 @@ MOCK_SHAPES: dict[BufferType, tuple] = {
 }
 
 
+# ── Spectral bands ───────────────────────────────────────────────────────────
+# Source-of-truth definitions for the synthetic IR spectral bands. Each band is
+# identified by its wavelength range and classified as primarily REFLECTIVE
+# (the sensor sees illumination bouncing off surfaces) or EMISSIVE (the sensor
+# sees thermal radiation the surface itself emits). SuperCamera.synthesize_ir()
+# selects a band by name and dispatches to its per-band synthesis model; the GUI
+# and the docs read these same definitions, so band facts live in exactly one
+# place.
+
+REFLECTIVE = "reflective"
+EMISSIVE = "emissive"
+
+
+@dataclass(frozen=True)
+class SpectralBand:
+    name: str                       # canonical band name (the mode= selector)
+    wavelength_min_nm: float        # lower edge of the band, nanometres
+    wavelength_max_nm: float        # upper edge of the band, nanometres
+    reflective_vs_emissive: str     # REFLECTIVE or EMISSIVE
+    description: str                 # sensor behaviour + dominant scene physics
+
+
+SPECTRAL_BANDS: dict[str, SpectralBand] = {
+    "VIS": SpectralBand(
+        name="VIS",
+        wavelength_min_nm=400.0,
+        wavelength_max_nm=700.0,
+        reflective_vs_emissive=REFLECTIVE,
+        description=(
+            "Visible reflectance. Passive ambient illumination reflected off "
+            "surfaces — diffuse + specular PBR response, no active illuminator "
+            "and no distance falloff."
+        ),
+    ),
+    "NIR_ACTIVE": SpectralBand(
+        name="NIR_ACTIVE",
+        wavelength_min_nm=700.0,
+        wavelength_max_nm=1000.0,
+        reflective_vs_emissive=REFLECTIVE,
+        description=(
+            "Active near-infrared. Coaxial illuminator (light source = camera); "
+            "reflected energy with strong specular highlights and inverse-square "
+            "distance falloff. Smooth surfaces give concentrated returns."
+        ),
+    ),
+    "SWIR_ACTIVE": SpectralBand(
+        name="SWIR_ACTIVE",
+        wavelength_min_nm=1000.0,
+        wavelength_max_nm=2500.0,
+        reflective_vs_emissive=REFLECTIVE,
+        description=(
+            "Active short-wave infrared. Like NIR_ACTIVE but largely colour-"
+            "blind: grayscale reflectance with greater emphasis on material and "
+            "roughness, plus specular response and inverse-square falloff."
+        ),
+    ),
+    "MWIR": SpectralBand(
+        name="MWIR",
+        wavelength_min_nm=3000.0,
+        wavelength_max_nm=5000.0,
+        reflective_vs_emissive=EMISSIVE,
+        description=(
+            "Mid-wave infrared thermal emission. Intensity from emissivity and "
+            "estimated temperature with a steep (T^4-style) response — strongly "
+            "biased toward hot objects (emissive materials, motion-derived heat)."
+        ),
+    ),
+    "LWIR": SpectralBand(
+        name="LWIR",
+        wavelength_min_nm=8000.0,
+        wavelength_max_nm=14000.0,
+        reflective_vs_emissive=EMISSIVE,
+        description=(
+            "Long-wave infrared thermal emission. Ambient-temperature band — "
+            "every surface emits; brightness is set by emissivity and ambient "
+            "temperature, geometry has only weak influence, no distance falloff."
+        ),
+    ),
+}
+
+# Deprecated mode aliases kept for backward compatibility. They map onto the
+# canonical band names above; SuperCamera emits a one-time deprecation notice
+# the first time each alias is used.
+DEPRECATED_BAND_ALIASES: dict[str, str] = {
+    "thermal": "LWIR",
+    "active_nir": "NIR_ACTIVE",
+}
+
+
 @dataclass
 class BufferData:
     buffer_type: BufferType

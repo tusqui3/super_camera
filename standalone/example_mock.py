@@ -28,8 +28,14 @@ print(f"Depth (jet):       shape={img.shape}, dtype={img.dtype}")
 img_thermal = camera.synthesize(max_distance=20.0, colormap="ironbow")
 print(f"Depth (ironbow):   shape={img_thermal.shape}, dtype={img_thermal.dtype}")
 
-ir = camera.synthesize_ir(mode="thermal")
-print(f"IR thermal (float):shape={ir.shape}, dtype={ir.dtype}, range=[{ir.min():.3f},{ir.max():.3f}]")
+# Exercise every spectral band's synthesis path (mock buffers are zero-filled,
+# so values are uniform — this checks shapes/dtypes, not realism).
+for band in ("VIS", "NIR_ACTIVE", "SWIR_ACTIVE", "MWIR", "LWIR"):
+    ir = camera.synthesize_ir(band)
+    print(f"IR {band:12s} (float): shape={ir.shape}, dtype={ir.dtype}, "
+          f"range=[{ir.min():.3f},{ir.max():.3f}]")
 
+# Deprecated aliases still resolve (thermal → LWIR, active_nir → NIR_ACTIVE).
+ir = camera.synthesize_ir(mode="thermal")
 ir_rgb = SuperCamera.colorize(ir, "ironbow")
-print(f"IR thermal (rgb):  shape={ir_rgb.shape}, dtype={ir_rgb.dtype}")
+print(f"IR thermal→LWIR (rgb): shape={ir_rgb.shape}, dtype={ir_rgb.dtype}")

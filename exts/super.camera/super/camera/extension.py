@@ -7,6 +7,14 @@ import omni.ui as ui
 import carb
 
 from .super_camera import SuperCamera
+from .buffers import SPECTRAL_BANDS, EMISSIVE
+
+# Bands whose synthesis uses the camera-position field (active illuminators).
+# Emissive bands (MWIR/LWIR) use the ambient-temperature field instead; VIS is
+# passive ambient and uses neither.
+_ACTIVE_BANDS = {"NIR_ACTIVE", "SWIR_ACTIVE"}
+_BAND_NAMES = list(SPECTRAL_BANDS.keys())
+_DEFAULT_BAND_IDX = _BAND_NAMES.index("LWIR")
 
 try:
     import omni.kit.ui as _kit_ui
@@ -30,7 +38,7 @@ class SuperCameraExtension(omni.ext.IExt):
         carb.log_info("[super.camera] on_startup called")
         try:
             self._camera: SuperCamera | None = None
-            self._mode_idx = 0
+            self._mode_idx = _DEFAULT_BAND_IDX
             self._window: ui.Window | None = None
             self._viewport_window = None
             self._menu = None
@@ -146,19 +154,21 @@ class SuperCameraExtension(omni.ext.IExt):
                         ui.Button("Create Camera", clicked_fn=self._on_create)
                         ui.Button("Open Viewport", clicked_fn=self._on_open_viewport)
 
-            with ui.CollapsableFrame("IR Mode", collapsed=False):
+            with ui.CollapsableFrame("Spectral Band", collapsed=False):
                 with ui.VStack(spacing=4, height=0):
                     with ui.HStack(height=24):
-                        ui.Label("Mode", width=90)
-                        self._mode_combo = ui.ComboBox(0, "Thermal LWIR", "Active NIR")
+                        ui.Label("Band", width=90)
+                        self._mode_combo = ui.ComboBox(_DEFAULT_BAND_IDX, *_BAND_NAMES)
                         self._mode_combo.model.add_item_changed_fn(self._on_mode_changed)
+
+                    self._band_desc = ui.Label("", height=0, word_wrap=True)
 
                     with ui.HStack(height=24):
                         self._ambient_label = ui.Label("Ambient Temp (K)", width=130)
                         self._ambient_temp = ui.FloatField()
                         self._ambient_temp.model.set_value(293.0)
 
-                    self._cam_pos_label = ui.Label("Camera Position (NIR)", height=20)
+                    self._cam_pos_label = ui.Label("Camera Position (active)", height=20)
                     with ui.HStack(height=24):
                         ui.Label("X", width=18)
                         self._cam_x = ui.FloatField()
@@ -249,14 +259,24 @@ class SuperCameraExtension(omni.ext.IExt):
     def _on_mode_changed(self, model, _item):
         try:
             val = model.get_item_value_model(model.get_current_item()).get_value_as_string()
-            self._mode_idx = 1 if val == "Active NIR" else 0
-            is_thermal = self._mode_idx == 0
-            self._ambient_label.enabled = is_thermal
-            self._ambient_temp.enabled = is_thermal
-            self._cam_pos_label.enabled = not is_thermal
-            self._cam_x.enabled = not is_thermal
-            self._cam_y.enabled = not is_thermal
-            self._cam_z.enabled = not is_thermal
+            self._mode_idx = _BAND_NAMES.index(val) if val in _BAND_NAMES else _DEFAULT_BAND_IDX
+            band = _BAND_NAMES[self._mode_idx]
+            spec = SPECTRAL_BANDS[band]
+            is_emissive = spec.reflective_vs_emissive == EMISSIVE
+            is_active = band in _ACTIVE_BANDS
+
+            self._band_desc.text = (
+                f"{int(spec.wavelength_min_nm)}–{int(spec.wavelength_max_nm)} nm · "
+                f"{spec.reflective_vs_emissive}\n{spec.description}"
+            )
+            # Ambient temp drives the emissive thermal bands; camera position
+            # drives the active reflective bands; VIS uses neither.
+            self._ambient_label.enabled = is_emissive
+            self._ambient_temp.enabled = is_emissive
+            self._cam_pos_label.enabled = is_active
+            self._cam_x.enabled = is_active
+            self._cam_y.enabled = is_active
+            self._cam_z.enabled = is_active
         except Exception as exc:
             carb.log_warn(f"[super.camera] mode change failed: {exc}")
 
@@ -267,7 +287,8 @@ class SuperCameraExtension(omni.ext.IExt):
     async def _capture_async(self):
         try:
             prim_path, (w, h) = self._get_params()
-            mode = "thermal" if self._mode_idx == 0 else "active_nir"
+            band = _BAND_NAMES[self._mode_idx]
+            is_active = band in _ACTIVE_BANDS
             ambient_temp = self._ambient_temp.model.get_value_as_float()
             cam_pos = np.array([
                 self._cam_x.model.get_value_as_float(),
@@ -281,8 +302,8 @@ class SuperCameraExtension(omni.ext.IExt):
             self._ensure_camera()
 
             ir = await self._camera.synthesize_ir_async(
-                mode=mode,
-                camera_pos=cam_pos if mode == "active_nir" else None,
+                mode=band,
+                camera_pos=cam_pos if is_active else None,
                 ambient_temp=ambient_temp,
             )
 

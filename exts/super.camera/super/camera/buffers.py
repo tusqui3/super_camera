@@ -19,14 +19,14 @@ class BufferType(str, Enum):
     # ── Color / Appearance ─────────────────────────────────────────────────────
     # RGBA color image                                        (H,W,4) uint8
     RGB = "rgb"
-    # Diffuse PBR albedo color                                (H,W,4) float32
-    DIFFUSE_ALBEDO = "diffuse_albedo"
-    # Specular PBR color                                      (H,W,4) float32
-    SPECULAR_ALBEDO = "specular_albedo"
-    # Surface roughness scalar                                (H,W) float32
-    ROUGHNESS = "roughness"
-    # Emissive color                                          (H,W,4) float32
-    EMISSIVE = "emissive"
+    # Diffuse PBR albedo color (RTX AOV)                      (H,W,4) float
+    DIFFUSE_ALBEDO = "DiffuseAlbedo"
+    # Specular PBR color (RTX AOV)                            (H,W,4) float
+    SPECULAR_ALBEDO = "SpecularAlbedo"
+    # Surface roughness (RTX AOV)                             (H,W[,C]) float
+    ROUGHNESS = "Roughness"
+    # Emission color + foreground mask (RTX AOV)              (H,W,4) float
+    EMISSIVE = "EmissionAndForegroundMask"
 
     # ── Motion ─────────────────────────────────────────────────────────────────
     # 2-D screen-space motion vectors                         (H,W,4) float32
@@ -58,6 +58,19 @@ class BufferType(str, Enum):
 
 
 ANNOTATOR_MAP: dict[BufferType, str] = {bt: bt.value for bt in BufferType}
+
+# Some annotators are exposed under different strings across Isaac Sim / Kit
+# versions. The primary name is BufferType.value (ANNOTATOR_MAP); these are tried
+# in order as fallbacks when the primary isn't registered — e.g. the PBR material
+# AOVs are CamelCase on Kit 107.x (DiffuseAlbedo) but were lowercase on older
+# builds (diffuse_albedo). _attach() walks primary → fallbacks and uses the first
+# that the AnnotatorRegistry knows.
+ANNOTATOR_FALLBACKS: dict[BufferType, list[str]] = {
+    BufferType.DIFFUSE_ALBEDO:  ["diffuse_albedo"],
+    BufferType.SPECULAR_ALBEDO: ["specular_albedo"],
+    BufferType.ROUGHNESS:       ["roughness"],
+    BufferType.EMISSIVE:        ["emissive", "Emission"],
+}
 
 STRUCTURED_BUFFERS: frozenset[BufferType] = frozenset({
     BufferType.SEMANTIC,

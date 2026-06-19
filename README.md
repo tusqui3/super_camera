@@ -335,11 +335,15 @@ Add a buffer at construction (`buffers=[...]`) or at runtime
 | `DEPTH` | `distance_to_image_plane` | `(H,W)` | float32 |
 | `NORMALS` | `normals` | `(H,W,4)` | float32 |
 | `RGB` | `rgb` | `(H,W,4)` | uint8 |
-| `DIFFUSE_ALBEDO` | `diffuse_albedo` | `(H,W,4)` | float32 |
-| `SPECULAR_ALBEDO` | `specular_albedo` | `(H,W,4)` | float32 |
-| `ROUGHNESS` | `roughness` | `(H,W)` | float32 |
-| `EMISSIVE` | `emissive` | `(H,W,4)` | float32 |
+| `DIFFUSE_ALBEDO` | `DiffuseAlbedo` | `(H,W,4)` | float |
+| `SPECULAR_ALBEDO` | `SpecularAlbedo` | `(H,W,4)` | float |
+| `ROUGHNESS` | `Roughness` | `(H,W[,C])` | float |
+| `EMISSIVE` | `EmissionAndForegroundMask` | `(H,W,4)` | float |
 | `MOTION_VECTORS` | `motion_vectors` | `(H,W,4)` | float32 |
+
+> The PBR material AOVs use **CamelCase** annotator names on Isaac Sim Kit 107.x.
+> Older lowercase names (`diffuse_albedo`, …) are kept as fallbacks and tried
+> automatically, so the same code works across builds.
 
 ### Structured buffers — `get_data()` returns `dict`
 

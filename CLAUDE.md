@@ -161,9 +161,9 @@ External events (opening a viewport, stage edits) can reset the SyntheticData pi
 
 ### Unregistered annotators
 
-Not every annotator name exists in every Isaac Sim build. `emissive`, and in some builds the PBR material AOVs `roughness` / `diffuse_albedo` / `specular_albedo`, are **not registered**. `_attach()` catches `AnnotatorRegistry.get_annotator` failures, prints a `[super.camera] annotator '<name>' not registered, skipping` line, and continues — the buffer is simply omitted from `self.buffers` and never reaches `bufs`.
+Not every annotator name exists in every Isaac Sim build. The PBR material AOVs are the main offenders: on **Kit 107.x** they are `DiffuseAlbedo` / `SpecularAlbedo` / `Roughness` / `EmissionAndForegroundMask` (CamelCase), but older builds used `diffuse_albedo` / … (lowercase). `_attach()` walks **primary → `ANNOTATOR_FALLBACKS`** (`buffers.py`) and uses the first the `AnnotatorRegistry` knows; if none resolve it prints `[super.camera] no registered annotator for <NAME> (tried [...]), skipping` and omits the buffer — it never reaches `bufs`. To discover the right string for a new build, read the `Available annotators: [...]` list in that skip message and add it to `ANNOTATOR_FALLBACKS` (or make it the `BufferType` value).
 
-**All material buffers are accessed through guarded helpers** so a missing AOV degrades gracefully instead of raising `KeyError` during synthesis: `_diffuse_gray()` → mid-gray `0.5`, `_specular_gray()` → `0.0` (no highlights), `_roughness()` → `0.5`, `_emissive_heat()` / `_motion_heat()` → `0.0`. A band whose material AOV is unavailable falls back to plain `N·V` shading (reflective) or uniform emissivity (emissive) rather than crashing. (Symptom this fixed: `Capture failed: 'ROUGHNESS'` — a `KeyError` from a synth model reading `bufs["ROUGHNESS"]` when the `roughness` annotator wasn't registered.) If your build exposes one of these under a different string, find the real name in the annotator list printed by the original `[super.camera] annotator '<name>' not registered` line and update that `BufferType`'s value in `buffers.py` (sync both copies).
+**All material buffers are accessed through guarded, shape-tolerant helpers** so a missing or oddly-shaped AOV degrades gracefully instead of raising `KeyError`/broadcast errors during synthesis: `_diffuse_gray()` → mid-gray `0.5`, `_specular_gray()` → `0.0` (no highlights), `_roughness()` → `0.5` (and reduces `(H,W,C)` → `(H,W)`), `_emissive_heat()` / `_motion_heat()` → `0.0`. A band whose material AOV is unavailable falls back to plain `N·V` shading (reflective) or uniform emissivity (emissive) rather than crashing. (Symptom this fixed: `Capture failed: 'ROUGHNESS'` — a `KeyError` from a synth model reading `bufs["ROUGHNESS"]` when the `roughness` annotator name was wrong for the build.)
 
 ## Buffer reference
 
@@ -177,11 +177,13 @@ All buffers are defined in `BufferType`. `ANNOTATOR_MAP` is auto-generated (`{bt
 | `DEPTH` | `distance_to_image_plane` | `(H,W)` | float32 | Orthogonal/z-buffer depth, metres |
 | `NORMALS` | `normals` | `(H,W,4)` | float32 | World-space XYZ + unused W |
 | `RGB` | `rgb` | `(H,W,4)` | uint8 | RGBA |
-| `DIFFUSE_ALBEDO` | `diffuse_albedo` | `(H,W,4)` | float32 | PBR diffuse color |
-| `SPECULAR_ALBEDO` | `specular_albedo` | `(H,W,4)` | float32 | PBR specular color |
-| `ROUGHNESS` | `roughness` | `(H,W)` | float32 | PBR roughness scalar |
-| `EMISSIVE` | `emissive` | `(H,W,4)` | float32 | Emissive color |
+| `DIFFUSE_ALBEDO` | `DiffuseAlbedo` (RTX AOV) | `(H,W,4)` | float | PBR diffuse color |
+| `SPECULAR_ALBEDO` | `SpecularAlbedo` (RTX AOV) | `(H,W,4)` | float | PBR specular color |
+| `ROUGHNESS` | `Roughness` (RTX AOV) | `(H,W[,C])` | float | PBR roughness |
+| `EMISSIVE` | `EmissionAndForegroundMask` (RTX AOV) | `(H,W,4)` | float | Emission color + foreground mask |
 | `MOTION_VECTORS` | `motion_vectors` | `(H,W,4)` | float32 | 2-D screen-space optical flow |
+
+The four PBR material AOVs use **CamelCase** annotator names on Kit 107.x; lowercase names (`diffuse_albedo`, …) from older builds are kept as `ANNOTATOR_FALLBACKS` (`buffers.py`) and `_attach()` tries primary → fallbacks. `Roughness` can come back single- or multi-channel — `_roughness()` reduces `(H,W,C)` to `(H,W)`. All four are read through guarded accessors, so an unavailable AOV degrades gracefully (see "Unregistered annotators").
 
 ### Structured buffers — `get_data()` returns `dict`
 
@@ -261,4 +263,4 @@ Without this import the extension enables without error but `on_startup` never r
 - Dependency extensions: `omni.replicator.core`, `omni.isaac.sensor`, `omni.syntheticdata`, `omni.kit.viewport.utility`.
 - Tested on Isaac Sim 4.x (Omniverse Kit 106.x).
 - `distance_to_camera` and `distance_to_image_plane` return `(H,W)` float32, not `(H,W,1)` — the old code had this wrong; mock shapes now reflect reality.
-- The old `albedo` / `"albedo"` annotator name was incorrect; Isaac Sim uses `diffuse_albedo`. Fixed in this version.
+- PBR material AOV annotator names are **build-specific**: Kit 107.x uses CamelCase (`DiffuseAlbedo`, `SpecularAlbedo`, `Roughness`, `EmissionAndForegroundMask`); older builds used lowercase (`diffuse_albedo`, …), kept as `ANNOTATOR_FALLBACKS`. The legacy `albedo` name was wrong on every build.

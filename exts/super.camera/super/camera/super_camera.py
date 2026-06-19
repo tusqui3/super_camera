@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .buffers import (
-    BufferType, BufferData, ANNOTATOR_MAP, STRUCTURED_BUFFERS, MOCK_SHAPES,
+    BufferType, BufferData, ANNOTATOR_MAP, ANNOTATOR_FALLBACKS, STRUCTURED_BUFFERS, MOCK_SHAPES,
     SPECTRAL_BANDS, DEPRECATED_BAND_ALIASES,
 )
 
@@ -157,13 +157,21 @@ class SuperCamera:
         return self._camera
 
     def _attach(self, buffer_type: BufferType) -> bool:
-        annotator_name = ANNOTATOR_MAP.get(buffer_type)
-        if not annotator_name:
+        primary = ANNOTATOR_MAP.get(buffer_type)
+        if not primary:
             raise ValueError(f"Unsupported buffer type: {buffer_type}")
-        try:
-            annotator = rep.AnnotatorRegistry.get_annotator(annotator_name)
-        except Exception as exc:
-            print(f"[super.camera] annotator '{annotator_name}' not registered, skipping {buffer_type.name}: {exc}")
+        candidates = [primary] + ANNOTATOR_FALLBACKS.get(buffer_type, [])
+        annotator = None
+        last_exc = None
+        for name in candidates:
+            try:
+                annotator = rep.AnnotatorRegistry.get_annotator(name)
+                break
+            except Exception as exc:
+                last_exc = exc
+        if annotator is None:
+            print(f"[super.camera] no registered annotator for {buffer_type.name} "
+                  f"(tried {candidates}), skipping: {last_exc}")
             return False
         annotator.attach([self._render_product])
         self._annotators[buffer_type] = annotator
@@ -435,22 +443,29 @@ class SuperCamera:
     def _diffuse_gray(bufs: Dict[str, np.ndarray], color_aware: bool = True) -> Any:
         # Base reflectance from diffuse albedo; mid-gray 0.5 when unavailable.
         if "DIFFUSE_ALBEDO" in bufs:
-            rgba = bufs["DIFFUSE_ALBEDO"]
-            return SuperCamera._luma(rgba) if color_aware else SuperCamera._gray(rgba)
+            a = bufs["DIFFUSE_ALBEDO"]
+            if a.ndim == 2:
+                return a
+            return SuperCamera._luma(a) if color_aware else SuperCamera._gray(a)
         return 0.5
 
     @staticmethod
     def _specular_gray(bufs: Dict[str, np.ndarray]) -> Any:
         # Specular reflectance; 0 (no highlights) when unavailable.
         if "SPECULAR_ALBEDO" in bufs:
-            return SuperCamera._gray(bufs["SPECULAR_ALBEDO"])
+            a = bufs["SPECULAR_ALBEDO"]
+            return a if a.ndim == 2 else SuperCamera._gray(a)
         return 0.0
 
     @staticmethod
     def _roughness(bufs: Dict[str, np.ndarray], lo: float = 0.0) -> Any:
         # PBR roughness clamped to [lo, 1]; mid-roughness 0.5 when unavailable.
+        # The Roughness AOV may come back single-channel (H,W) or packed (H,W,C).
         if "ROUGHNESS" in bufs:
-            return np.clip(bufs["ROUGHNESS"], lo, 1.0)
+            r = bufs["ROUGHNESS"]
+            if r.ndim == 3:
+                r = r[:, :, 0]
+            return np.clip(r, lo, 1.0)
         return 0.5
 
     @staticmethod
@@ -465,9 +480,11 @@ class SuperCamera:
     @staticmethod
     def _emissive_heat(bufs: Dict[str, np.ndarray]) -> Any:
         # Self-lit / hot materials act as a heat source. 0 when EMISSIVE is
-        # unattached or unregistered in this build.
+        # unattached or unregistered in this build. The EmissionAndForegroundMask
+        # AOV packs emission RGB (+ a foreground mask) — take the colour channels.
         if "EMISSIVE" in bufs:
-            return SuperCamera._gray(bufs["EMISSIVE"])
+            e = bufs["EMISSIVE"]
+            return e if e.ndim == 2 else SuperCamera._gray(e)
         return 0.0
 
     @staticmethod

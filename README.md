@@ -197,9 +197,11 @@ ir = camera.synthesize_ir("NIR_ACTIVE", camera_pos=np.array([0, 0, 5]))   # acti
 ir = camera.synthesize_ir("VIS")                                   # visible reflectance
 ```
 
-- `camera_pos` feeds the active illuminator / view vector used by the reflective
-  bands (only used when `POINTCLOUD` is attached; otherwise a `+Z` fallback view
-  vector is used).
+- `camera_pos` is the world-space illuminator / viewpoint origin for the active
+  reflective bands. Per-pixel world positions are reconstructed from the distance
+  buffer + the camera prim's pose, and the view vector points from each surface
+  toward `camera_pos` (falls back to a fixed `+Z` direction if `camera_pos` is
+  omitted or the camera pose is unavailable).
 - `ambient_temp` (Kelvin) sets the baseline temperature for the **emissive** bands
   (`MWIR`, `LWIR`); it is ignored by the reflective bands.
 

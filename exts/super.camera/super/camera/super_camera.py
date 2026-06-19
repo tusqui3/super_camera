@@ -371,14 +371,10 @@ class SuperCamera:
         norm_lens = np.linalg.norm(normals, axis=2, keepdims=True)
         normals = np.divide(normals, norm_lens, out=np.zeros_like(normals), where=norm_lens > 0)
 
-        if camera_pos is not None and "POINTCLOUD" in bufs and bufs["POINTCLOUD"].ndim == 3:
-            view_vec = camera_pos - bufs["POINTCLOUD"][:, :, :3]
-        else:
-            view_vec = np.zeros((H, W, 3), dtype=np.float32)
-            view_vec[:, :, 2] = 1.0
-
-        view_lens = np.linalg.norm(view_vec, axis=2, keepdims=True)
-        view_vec = np.divide(view_vec, view_lens, out=np.zeros_like(view_vec), where=view_lens > 0)
+        # Unit world-space view direction (surface → camera_pos) for the geometry
+        # term. Reconstructed per-pixel from the distance buffer + camera pose;
+        # +Z fallback when camera_pos is None or the pose is unavailable.
+        view_vec = self._view_vectors(bufs["DISTANCE_TO_OBJECT"], camera_pos, H, W)
 
         dot_n_v = np.clip(np.sum(normals * view_vec, axis=2), 0.0, 1.0)
 
@@ -430,13 +426,40 @@ class SuperCamera:
         # Flat, colour-agnostic grayscale (channel mean).
         return np.mean(rgba[:, :, :3], axis=2)
 
+    # The PBR material AOVs (diffuse_albedo / specular_albedo / roughness) are not
+    # registered in every Isaac Sim build — _attach() skips any it can't get, so
+    # they may be absent from `bufs`. These accessors fall back to neutral
+    # constants so a band degrades to plain shading instead of raising KeyError.
+
+    @staticmethod
+    def _diffuse_gray(bufs: Dict[str, np.ndarray], color_aware: bool = True) -> Any:
+        # Base reflectance from diffuse albedo; mid-gray 0.5 when unavailable.
+        if "DIFFUSE_ALBEDO" in bufs:
+            rgba = bufs["DIFFUSE_ALBEDO"]
+            return SuperCamera._luma(rgba) if color_aware else SuperCamera._gray(rgba)
+        return 0.5
+
+    @staticmethod
+    def _specular_gray(bufs: Dict[str, np.ndarray]) -> Any:
+        # Specular reflectance; 0 (no highlights) when unavailable.
+        if "SPECULAR_ALBEDO" in bufs:
+            return SuperCamera._gray(bufs["SPECULAR_ALBEDO"])
+        return 0.0
+
+    @staticmethod
+    def _roughness(bufs: Dict[str, np.ndarray], lo: float = 0.0) -> Any:
+        # PBR roughness clamped to [lo, 1]; mid-roughness 0.5 when unavailable.
+        if "ROUGHNESS" in bufs:
+            return np.clip(bufs["ROUGHNESS"], lo, 1.0)
+        return 0.5
+
     @staticmethod
     def _emissivity(bufs: Dict[str, np.ndarray]) -> np.ndarray:
         # Infer emissivity from PBR material: rough, diffuse (dielectric) surfaces
         # emit efficiently (ε → 1); smooth, specular (metallic) surfaces emit
         # poorly (ε → 0). Used by the emissive thermal bands.
-        roughness = np.clip(bufs["ROUGHNESS"], 0.0, 1.0)
-        specular_gray = np.clip(SuperCamera._gray(bufs["SPECULAR_ALBEDO"]), 0.0, 1.0)
+        roughness = SuperCamera._roughness(bufs, lo=0.0)
+        specular_gray = np.clip(SuperCamera._specular_gray(bufs), 0.0, 1.0)
         return np.clip(0.5 + 0.5 * roughness - 0.4 * specular_gray, 0.05, 1.0)
 
     @staticmethod
@@ -456,6 +479,79 @@ class SuperCamera:
             return np.clip(mag / _MOTION_SCALE, 0.0, 1.0)
         return 0.0
 
+    # ── View / illuminator geometry ─────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_vec(vec: np.ndarray) -> np.ndarray:
+        lens = np.linalg.norm(vec, axis=2, keepdims=True)
+        return np.divide(vec, lens, out=np.zeros_like(vec), where=lens > 0)
+
+    def _view_vectors(
+        self, distance: np.ndarray, camera_pos: Optional[np.ndarray], H: int, W: int
+    ) -> np.ndarray:
+        # Unit world-space vector from each surface point toward the illuminator /
+        # viewpoint `camera_pos` (used by the active reflective bands' N·V term).
+        # Falls back to a fixed +Z direction when camera_pos is not supplied or the
+        # camera world position cannot be reconstructed (mock, missing prim, etc.).
+        if camera_pos is not None:
+            world_pos = self._reconstruct_world_pos(distance, H, W)
+            if world_pos is not None:
+                cam = np.asarray(camera_pos, dtype=np.float64).reshape(1, 1, 3)
+                return self._normalize_vec(cam - world_pos).astype(np.float32)
+        fallback = np.zeros((H, W, 3), dtype=np.float32)
+        fallback[:, :, 2] = 1.0
+        return fallback
+
+    def _reconstruct_world_pos(
+        self, distance: np.ndarray, H: int, W: int
+    ) -> Optional[np.ndarray]:
+        # Reconstruct per-pixel world-space surface positions from the Euclidean
+        # `distance_to_camera` buffer plus the camera prim's USD pose and pinhole
+        # intrinsics. Returns (H, W, 3) float64, or None if anything is missing
+        # (mock mode, no prim, no intrinsics) so the caller uses the +Z fallback.
+        # Uses only stable USD APIs (no omni.isaac.sensor.Camera), so it stays
+        # viewport-safe. NOTE: the image-row / aperture conventions below assume a
+        # standard USD camera (looks down local −Z, +X right, +Y up, row 0 = top);
+        # worth a visual sanity-check on the workstation.
+        if self._mock:
+            return None
+        try:
+            import omni.usd
+            from pxr import UsdGeom, Usd
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(self.prim_path)
+            if not prim or not prim.IsValid():
+                return None
+            m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            cam = UsdGeom.Camera(prim)
+            focal = float(cam.GetFocalLengthAttr().Get() or 0.0)
+            h_ap = float(cam.GetHorizontalApertureAttr().Get() or 0.0)
+            v_ap = float(cam.GetVerticalApertureAttr().Get() or 0.0)
+        except Exception:
+            return None
+        if focal <= 0.0 or h_ap <= 0.0:
+            return None
+        if v_ap <= 0.0:
+            v_ap = h_ap * (H / W)
+        # Gf.Matrix4d is row-major with a row-vector convention (v_world = v_local · M):
+        # rows 0..2 are the world-space images of the camera's local X/Y/Z axes,
+        # row 3 is the world-space camera origin.
+        basis = np.array([[m[0][0], m[0][1], m[0][2]],
+                          [m[1][0], m[1][1], m[1][2]],
+                          [m[2][0], m[2][1], m[2][2]]], dtype=np.float64)
+        origin = np.array([m[3][0], m[3][1], m[3][2]], dtype=np.float64)
+        # Per-pixel camera-space pinhole rays. u spans the horizontal aperture
+        # (−1=left … +1=right), v the vertical (+1=top … −1=bottom); the camera
+        # looks down local −Z, so the ray's local Z is −focal.
+        us = (np.arange(W, dtype=np.float64) + 0.5) / W * 2.0 - 1.0
+        vs = 1.0 - (np.arange(H, dtype=np.float64) + 0.5) / H * 2.0
+        u, v = np.meshgrid(us, vs)
+        rays_local = np.stack([u * (h_ap * 0.5), v * (v_ap * 0.5),
+                               np.full_like(u, -focal)], axis=-1)
+        rays_world = self._normalize_vec(rays_local @ basis)
+        dist = np.asarray(distance, dtype=np.float64)[:, :, None]
+        return origin[None, None, :] + dist * rays_world
+
     # ── Per-band synthesis models ───────────────────────────────────────────
 
     def _synth_vis(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray) -> np.ndarray:
@@ -463,9 +559,9 @@ class SuperCamera:
         # diffuse Lambertian term + a specular sheen whose tightness grows as the
         # surface smooths (shininess = 1/roughness). No active illuminator, so no
         # inverse-square distance falloff.
-        diffuse_gray = self._luma(bufs["DIFFUSE_ALBEDO"])
-        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
-        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        diffuse_gray = self._diffuse_gray(bufs, color_aware=True)
+        specular_gray = self._specular_gray(bufs)
+        roughness = self._roughness(bufs, lo=0.01)
         specular = specular_gray * (dot_n_v ** (1.0 / roughness))
         return diffuse_gray * dot_n_v + specular
 
@@ -475,9 +571,9 @@ class SuperCamera:
         # specular term boosted above VIS so smooth, low-roughness surfaces give
         # concentrated glints; inverse-square distance attenuation for the active
         # source.
-        diffuse_gray = self._luma(bufs["DIFFUSE_ALBEDO"])
-        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
-        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        diffuse_gray = self._diffuse_gray(bufs, color_aware=True)
+        specular_gray = self._specular_gray(bufs)
+        roughness = self._roughness(bufs, lo=0.01)
         specular = _NIR_SPECULAR_GAIN * specular_gray * (dot_n_v ** (1.0 / roughness))
         reflection = diffuse_gray * dot_n_v + specular
         distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)
@@ -489,9 +585,9 @@ class SuperCamera:
         # greater emphasis on material reflectance — a stronger specular term and
         # a diffuse base modulated by surface smoothness (1 - roughness). Active
         # source → inverse-square distance attenuation.
-        reflect_gray = self._gray(bufs["DIFFUSE_ALBEDO"])
-        specular_gray = self._gray(bufs["SPECULAR_ALBEDO"])
-        roughness = np.clip(bufs["ROUGHNESS"], 0.01, 1.0)
+        reflect_gray = self._diffuse_gray(bufs, color_aware=False)
+        specular_gray = self._specular_gray(bufs)
+        roughness = self._roughness(bufs, lo=0.01)
         specular = _SWIR_SPECULAR_GAIN * specular_gray * (dot_n_v ** (1.0 / roughness))
         reflection = reflect_gray * dot_n_v * (1.0 - 0.5 * roughness) + specular
         distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)

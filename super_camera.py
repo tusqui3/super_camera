@@ -7,7 +7,18 @@ from .buffers import (
     SPECTRAL_BANDS, DEPRECATED_BAND_ALIASES,
 )
 
-_WARMUP_STEPS = 64
+_WARMUP_STEPS = 16
+
+# RTX anti-aliasing op. DLSS (3) is an upscaler: it renders the scene at a lower
+# internal resolution and upscales the final colour, but the PBR material AOVs come
+# back at that internal render resolution while distance/normals come back at the
+# upscaled output resolution. That split mismatched AOV shapes and left the SDG
+# OgnSdPostRenderVarToHost node with an invalid render-product binding, flooding the
+# log every frame during capture. Forcing a non-upscaling op (TAA) for the duration
+# of a capture keeps every AOV at the render product's native resolution. The key /
+# value are build-specific — adjust here if the flood persists on a given build.
+_AA_OP_SETTING = "/rtx/post/aa/op"
+_AA_OP_NO_UPSCALE = 1
 
 try:
     import omni.replicator.core as rep
@@ -228,15 +239,50 @@ class SuperCamera:
         self._warmup_steps = 0
         return n
 
+    def _set_no_upscale(self) -> Any:
+        # Switch the renderer to a non-upscaling AA op while the standalone render
+        # product renders, returning the previous value so it can be restored. See
+        # the _AA_OP_* constants for why upscaling (DLSS) breaks the AOV bindings.
+        if self._mock:
+            return None
+        try:
+            import carb
+            settings = carb.settings.get_settings()
+            prev = settings.get(_AA_OP_SETTING)
+            if prev != _AA_OP_NO_UPSCALE:
+                settings.set(_AA_OP_SETTING, _AA_OP_NO_UPSCALE)
+            return prev
+        except Exception:
+            return None
+
+    def _restore_aa(self, prev: Any):
+        # Restore the AA op captured by _set_no_upscale so the main viewport's
+        # appearance is left unchanged outside of a capture.
+        if self._mock or prev is None:
+            return
+        try:
+            import carb
+            carb.settings.get_settings().set(_AA_OP_SETTING, prev)
+        except Exception:
+            pass
+
     def _step_sync(self):
-        for _ in range(self._consume_warmup_steps()):
+        prev = self._set_no_upscale()
+        try:
+            for _ in range(self._consume_warmup_steps()):
+                rep.orchestrator.step(rt_subframes=1)
             rep.orchestrator.step(rt_subframes=1)
-        rep.orchestrator.step(rt_subframes=1)
+        finally:
+            self._restore_aa(prev)
 
     async def _step_async(self):
-        for _ in range(self._consume_warmup_steps()):
+        prev = self._set_no_upscale()
+        try:
+            for _ in range(self._consume_warmup_steps()):
+                await rep.orchestrator.step_async(rt_subframes=1)
             await rep.orchestrator.step_async(rt_subframes=1)
-        await rep.orchestrator.step_async(rt_subframes=1)
+        finally:
+            self._restore_aa(prev)
 
     def capture(self) -> Dict[BufferType, BufferData]:
         if self._mock:

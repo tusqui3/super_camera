@@ -455,6 +455,10 @@ class SuperCamera:
             ir_intensity = self._synth_lwir(bufs, dot_n_v, ambient_temp)
 
         out = np.maximum(ir_intensity, 0.0).astype(np.float32)
+        # Final guard: any inf/nan a synth model produced (e.g. an overflowed
+        # specular multiply) becomes 0 here, so it can't poison out.max() (which
+        # would collapse the whole-frame normalization) or leak into colorize().
+        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out[background] = 0.0
         omax = float(out.max())
         if omax > 0.0:
@@ -501,10 +505,13 @@ class SuperCamera:
 
     @staticmethod
     def _specular_gray(bufs: Dict[str, np.ndarray]) -> Any:
-        # Specular reflectance; 0 (no highlights) when unavailable.
+        # Specular reflectance; 0 (no highlights) when unavailable. Clamped to the
+        # physical [0,1] range so a cold/garbage AOV (huge finite values that
+        # nan_to_num leaves untouched) can't overflow the specular multiply.
         if "SPECULAR_ALBEDO" in bufs:
             a = bufs["SPECULAR_ALBEDO"]
-            return a if a.ndim == 2 else SuperCamera._gray(a)
+            spec = a if a.ndim == 2 else SuperCamera._gray(a)
+            return np.clip(spec, 0.0, 1.0)
         return 0.0
 
     @staticmethod

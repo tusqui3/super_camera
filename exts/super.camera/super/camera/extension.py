@@ -253,8 +253,8 @@ class SuperCameraExtension(omni.ext.IExt):
 
     def _on_mode_changed(self, model, _item):
         try:
-            val = model.get_item_value_model(model.get_current_item()).get_value_as_string()
-            self._mode_idx = _BAND_NAMES.index(val) if val in _BAND_NAMES else _DEFAULT_BAND_IDX
+            idx = model.get_item_value_model().get_value_as_int()
+            self._mode_idx = idx if 0 <= idx < len(_BAND_NAMES) else _DEFAULT_BAND_IDX
             band = _BAND_NAMES[self._mode_idx]
             spec = SPECTRAL_BANDS[band]
             is_emissive = spec.reflective_vs_emissive == EMISSIVE

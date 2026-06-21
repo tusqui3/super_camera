@@ -168,17 +168,12 @@ class SuperCameraExtension(omni.ext.IExt):
                         self._ambient_temp = ui.FloatField()
                         self._ambient_temp.model.set_value(293.0)
 
-                    self._cam_pos_label = ui.Label("Camera Position (active)", height=20)
-                    with ui.HStack(height=24):
-                        ui.Label("X", width=18)
-                        self._cam_x = ui.FloatField()
-                        self._cam_x.model.set_value(0.0)
-                        ui.Label("Y", width=18)
-                        self._cam_y = ui.FloatField()
-                        self._cam_y.model.set_value(0.0)
-                        ui.Label("Z", width=18)
-                        self._cam_z = ui.FloatField()
-                        self._cam_z.model.set_value(0.0)
+                    self._cam_pos_label = ui.Label(
+                        "Active bands: the light source is located at the camera "
+                        "eye (coaxial illumination).",
+                        height=0,
+                        word_wrap=True,
+                    )
 
             if _has_preview:
                 with ui.CollapsableFrame("IR Preview", collapsed=False):
@@ -274,9 +269,6 @@ class SuperCameraExtension(omni.ext.IExt):
             self._ambient_label.enabled = is_emissive
             self._ambient_temp.enabled = is_emissive
             self._cam_pos_label.enabled = is_active
-            self._cam_x.enabled = is_active
-            self._cam_y.enabled = is_active
-            self._cam_z.enabled = is_active
         except Exception as exc:
             carb.log_warn(f"[super.camera] mode change failed: {exc}")
 
@@ -288,13 +280,7 @@ class SuperCameraExtension(omni.ext.IExt):
         try:
             prim_path, (w, h) = self._get_params()
             band = _BAND_NAMES[self._mode_idx]
-            is_active = band in _ACTIVE_BANDS
             ambient_temp = self._ambient_temp.model.get_value_as_float()
-            cam_pos = np.array([
-                self._cam_x.model.get_value_as_float(),
-                self._cam_y.model.get_value_as_float(),
-                self._cam_z.model.get_value_as_float(),
-            ])
             output_path = os.path.expanduser(os.path.expandvars(
                 self._output_path.model.get_value_as_string()
             ))
@@ -303,7 +289,6 @@ class SuperCameraExtension(omni.ext.IExt):
 
             ir = await self._camera.synthesize_ir_async(
                 mode=band,
-                camera_pos=cam_pos if is_active else None,
                 ambient_temp=ambient_temp,
             )
 

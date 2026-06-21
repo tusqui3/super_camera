@@ -185,23 +185,22 @@ object stands out in `MWIR`.
 
 ## IR synthesis
 
-`synthesize_ir(mode, camera_pos=None, ambient_temp=293.0)` returns a **float32
+`synthesize_ir(mode, ambient_temp=293.0)` returns a **float32
 `(H, W)` array in `[0, 1]`** built from per-buffer data. `mode` is a band name
 (case-insensitive). Required buffers are auto-attached on first call. Background /
 no-hit ("miss") rays are forced to `0`.
 
 ```python
-ir = camera.synthesize_ir("LWIR")                                  # thermal
-ir = camera.synthesize_ir("MWIR", ambient_temp=300.0)              # hot-biased thermal
-ir = camera.synthesize_ir("NIR_ACTIVE", camera_pos=np.array([0, 0, 5]))   # active reflective
-ir = camera.synthesize_ir("VIS")                                   # visible reflectance
+ir = camera.synthesize_ir("LWIR")                     # thermal
+ir = camera.synthesize_ir("MWIR", ambient_temp=300.0) # hot-biased thermal
+ir = camera.synthesize_ir("NIR_ACTIVE")               # active reflective
+ir = camera.synthesize_ir("VIS")                      # visible reflectance
 ```
 
-- `camera_pos` is the world-space illuminator / viewpoint origin for the active
-  reflective bands. Per-pixel world positions are reconstructed from the distance
-  buffer + the camera prim's pose, and the view vector points from each surface
-  toward `camera_pos` (falls back to a fixed `+Z` direction if `camera_pos` is
-  omitted or the camera pose is unavailable).
+- The active reflective bands (`NIR_ACTIVE`, `SWIR_ACTIVE`) assume a **coaxial
+  illuminator located at the camera eye** — the light shares the camera's
+  viewpoint, so the view direction doubles as the illumination direction. There is
+  no separate light-position input.
 - `ambient_temp` (Kelvin) sets the baseline temperature for the **emissive** bands
   (`MWIR`, `LWIR`); it is ignored by the reflective bands.
 
@@ -314,7 +313,7 @@ When the extension loads, a **Super Camera** window appears automatically.
 | Section | Controls |
 |---|---|
 | Camera Setup | Prim Path, Width × Height, **Create Camera**, **Open Viewport** |
-| Spectral Band | Band dropdown (`VIS` / `NIR_ACTIVE` / `SWIR_ACTIVE` / `MWIR` / `LWIR`) with a live wavelength + reflective/emissive description; Ambient Temp enabled for emissive bands, Camera Position for active bands |
+| Spectral Band | Band dropdown (`VIS` / `NIR_ACTIVE` / `SWIR_ACTIVE` / `MWIR` / `LWIR`) with a live wavelength + reflective/emissive description; Ambient Temp enabled for emissive bands; active bands show a note that the light source sits at the camera eye |
 | IR Preview | Live ironbow thumbnail updated after each capture |
 | Output | Save Path for the PNG |
 | Buttons | **Capture IR Frame**, **Reset Camera** |

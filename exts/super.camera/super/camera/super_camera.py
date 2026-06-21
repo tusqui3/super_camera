@@ -279,7 +279,6 @@ class SuperCamera:
     def synthesize_ir_from_render(
         self,
         mode: str = "LWIR",
-        camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
         # Like synthesize_ir(), but reads the already-rendered frame via read()
@@ -289,7 +288,7 @@ class SuperCamera:
         for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = self.read()
-        return self._compute_ir(captured, band, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, ambient_temp)
 
     def get_buffer(self, buffer_type: BufferType) -> BufferData:
         if not self._mock and buffer_type not in self._annotators:
@@ -335,32 +334,29 @@ class SuperCamera:
     def synthesize_ir(
         self,
         mode: str = "LWIR",
-        camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
         band = _resolve_band(mode)
         for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = self.capture()
-        return self._compute_ir(captured, band, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, ambient_temp)
 
     async def synthesize_ir_async(
         self,
         mode: str = "LWIR",
-        camera_pos: Optional[np.ndarray] = None,
         ambient_temp: float = 293.0,
     ) -> np.ndarray:
         band = _resolve_band(mode)
         for bt in _BAND_BUFFERS[band]:
             self.add_buffer(bt)
         captured = await self.capture_async()
-        return self._compute_ir(captured, band, camera_pos, ambient_temp)
+        return self._compute_ir(captured, band, ambient_temp)
 
     def _compute_ir(
         self,
         captured: Dict[BufferType, BufferData],
         mode: str,
-        camera_pos: Optional[np.ndarray],
         ambient_temp: float,
     ) -> np.ndarray:
         # Resolve defensively so a direct _compute_ir() call (or an alias) still
@@ -371,6 +367,13 @@ class SuperCamera:
         H, W = bufs["DISTANCE_TO_OBJECT"].shape
         background = ~np.isfinite(bufs["DISTANCE_TO_OBJECT"])
 
+        # AOVs can come back at different resolutions (e.g. material AOVs at the
+        # render resolution while distance/normals are at the upscaled output
+        # resolution). Resample every pixel buffer to the distance buffer's (H, W)
+        # so the per-pixel math broadcasts; distance defines the output size/mask.
+        for _name, _arr in list(bufs.items()):
+            bufs[_name] = self._resample_to(_arr, H, W)
+
         for _name, _arr in list(bufs.items()):
             if isinstance(_arr, np.ndarray) and np.issubdtype(_arr.dtype, np.floating):
                 bufs[_name] = np.nan_to_num(_arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -379,10 +382,11 @@ class SuperCamera:
         norm_lens = np.linalg.norm(normals, axis=2, keepdims=True)
         normals = np.divide(normals, norm_lens, out=np.zeros_like(normals), where=norm_lens > 0)
 
-        # Unit world-space view direction (surface → camera_pos) for the geometry
-        # term. Reconstructed per-pixel from the distance buffer + camera pose;
-        # +Z fallback when camera_pos is None or the pose is unavailable.
-        view_vec = self._view_vectors(bufs["DISTANCE_TO_OBJECT"], camera_pos, H, W)
+        # The illuminator is coaxial with the camera (the light sits at the camera
+        # eye), so the fixed +Z view vector also serves as the illumination
+        # direction for the N·V geometry term.
+        view_vec = np.zeros((H, W, 3), dtype=np.float32)
+        view_vec[:, :, 2] = 1.0
 
         dot_n_v = np.clip(np.sum(normals * view_vec, axis=2), 0.0, 1.0)
 
@@ -496,78 +500,22 @@ class SuperCamera:
             return np.clip(mag / _MOTION_SCALE, 0.0, 1.0)
         return 0.0
 
-    # ── View / illuminator geometry ─────────────────────────────────────────
+    # ── Buffer geometry ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _normalize_vec(vec: np.ndarray) -> np.ndarray:
-        lens = np.linalg.norm(vec, axis=2, keepdims=True)
-        return np.divide(vec, lens, out=np.zeros_like(vec), where=lens > 0)
-
-    def _view_vectors(
-        self, distance: np.ndarray, camera_pos: Optional[np.ndarray], H: int, W: int
-    ) -> np.ndarray:
-        # Unit world-space vector from each surface point toward the illuminator /
-        # viewpoint `camera_pos` (used by the active reflective bands' N·V term).
-        # Falls back to a fixed +Z direction when camera_pos is not supplied or the
-        # camera world position cannot be reconstructed (mock, missing prim, etc.).
-        if camera_pos is not None:
-            world_pos = self._reconstruct_world_pos(distance, H, W)
-            if world_pos is not None:
-                cam = np.asarray(camera_pos, dtype=np.float64).reshape(1, 1, 3)
-                return self._normalize_vec(cam - world_pos).astype(np.float32)
-        fallback = np.zeros((H, W, 3), dtype=np.float32)
-        fallback[:, :, 2] = 1.0
-        return fallback
-
-    def _reconstruct_world_pos(
-        self, distance: np.ndarray, H: int, W: int
-    ) -> Optional[np.ndarray]:
-        # Reconstruct per-pixel world-space surface positions from the Euclidean
-        # `distance_to_camera` buffer plus the camera prim's USD pose and pinhole
-        # intrinsics. Returns (H, W, 3) float64, or None if anything is missing
-        # (mock mode, no prim, no intrinsics) so the caller uses the +Z fallback.
-        # Uses only stable USD APIs (no omni.isaac.sensor.Camera), so it stays
-        # viewport-safe. NOTE: the image-row / aperture conventions below assume a
-        # standard USD camera (looks down local −Z, +X right, +Y up, row 0 = top);
-        # worth a visual sanity-check on the workstation.
-        if self._mock:
-            return None
-        try:
-            import omni.usd
-            from pxr import UsdGeom, Usd
-            stage = omni.usd.get_context().get_stage()
-            prim = stage.GetPrimAtPath(self.prim_path)
-            if not prim or not prim.IsValid():
-                return None
-            m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            cam = UsdGeom.Camera(prim)
-            focal = float(cam.GetFocalLengthAttr().Get() or 0.0)
-            h_ap = float(cam.GetHorizontalApertureAttr().Get() or 0.0)
-            v_ap = float(cam.GetVerticalApertureAttr().Get() or 0.0)
-        except Exception:
-            return None
-        if focal <= 0.0 or h_ap <= 0.0:
-            return None
-        if v_ap <= 0.0:
-            v_ap = h_ap * (H / W)
-        # Gf.Matrix4d is row-major with a row-vector convention (v_world = v_local · M):
-        # rows 0..2 are the world-space images of the camera's local X/Y/Z axes,
-        # row 3 is the world-space camera origin.
-        basis = np.array([[m[0][0], m[0][1], m[0][2]],
-                          [m[1][0], m[1][1], m[1][2]],
-                          [m[2][0], m[2][1], m[2][2]]], dtype=np.float64)
-        origin = np.array([m[3][0], m[3][1], m[3][2]], dtype=np.float64)
-        # Per-pixel camera-space pinhole rays. u spans the horizontal aperture
-        # (−1=left … +1=right), v the vertical (+1=top … −1=bottom); the camera
-        # looks down local −Z, so the ray's local Z is −focal.
-        us = (np.arange(W, dtype=np.float64) + 0.5) / W * 2.0 - 1.0
-        vs = 1.0 - (np.arange(H, dtype=np.float64) + 0.5) / H * 2.0
-        u, v = np.meshgrid(us, vs)
-        rays_local = np.stack([u * (h_ap * 0.5), v * (v_ap * 0.5),
-                               np.full_like(u, -focal)], axis=-1)
-        rays_world = self._normalize_vec(rays_local @ basis)
-        dist = np.asarray(distance, dtype=np.float64)[:, :, None]
-        return origin[None, None, :] + dist * rays_world
+    def _resample_to(arr: Any, H: int, W: int) -> Any:
+        # Nearest-neighbour resample of a pixel buffer to (H, W). Used so AOVs that
+        # come back at a different resolution than the distance buffer still
+        # broadcast in the per-pixel IR math. Non-array / sub-2-D inputs pass
+        # through untouched.
+        if not isinstance(arr, np.ndarray) or arr.ndim < 2:
+            return arr
+        h, w = arr.shape[:2]
+        if h == H and w == W:
+            return arr
+        ys = (np.arange(H) * h // H).astype(np.intp)
+        xs = (np.arange(W) * w // W).astype(np.intp)
+        return arr[ys][:, xs]
 
     # ── Per-band synthesis models ───────────────────────────────────────────
 

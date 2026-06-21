@@ -64,7 +64,7 @@ A colormap is a **fixed LUT**, not AGC — it does not reintroduce the percentil
 
 ## IR spectral bands
 
-`SuperCamera.synthesize_ir(mode, camera_pos, ambient_temp)` returns a `float32 (H,W)` array in **`[0,1]`** built purely from per-buffer render data — **no calibrated radiometry, no noise**. `mode` is a **spectral-band name** (case-insensitive); each band has its own physically-motivated `_synth_*` model. The final output is normalized in `_compute_ir` by its own max (`out / out.max()`), so it is always directly displayable. Required buffers are auto-attached on first call.
+`SuperCamera.synthesize_ir(mode, ambient_temp)` returns a `float32 (H,W)` array in **`[0,1]`** built purely from per-buffer render data — **no calibrated radiometry, no noise**. `mode` is a **spectral-band name** (case-insensitive); each band has its own physically-motivated `_synth_*` model. The final output is normalized in `_compute_ir` by its own max (`out / out.max()`), so it is always directly displayable. Required buffers are auto-attached on first call.
 
 **Mode resolution & deprecated aliases:** `_resolve_band(mode)` maps the `mode` string to a canonical band in `SPECTRAL_BANDS`. It accepts canonical names (any case) plus two **deprecated** aliases kept for backward compatibility — `thermal` → **`LWIR`**, `active_nir` → **`NIR_ACTIVE`** (`DEPRECATED_BAND_ALIASES` in `buffers.py`) — printing a one-time `[super.camera]` deprecation notice. Public method defaults are now `mode="LWIR"`. Unknown names raise `ValueError`.
 
@@ -72,18 +72,18 @@ A colormap is a **fixed LUT**, not AGC — it does not reintroduce the percentil
 
 **Buffers per band** (`_BAND_BUFFERS` in `super_camera.py`): reflective bands (`VIS`/`NIR_ACTIVE`/`SWIR_ACTIVE`) use `_REFLECTIVE_BUFFERS` = `DISTANCE_TO_OBJECT, NORMALS, DIFFUSE_ALBEDO, SPECULAR_ALBEDO, ROUGHNESS`. Emissive bands (`MWIR`/`LWIR`) use `_EMISSIVE_BUFFERS` = the reflective set **+** `EMISSIVE, MOTION_VECTORS`. `EMISSIVE` may be unregistered in some builds — `_attach()` skips it and the emissive models guard with `if "EMISSIVE" in bufs`.
 
-**`ambient_temp`** (Kelvin) is now **used** by the emissive bands (`MWIR`/`LWIR`) as the baseline temperature proxy (`ambient_temp / _AMBIENT_REF_K`, ref 293 K). It is ignored by the reflective bands. **`camera_pos`** is the world-space illuminator / viewpoint origin for the active reflective bands; `_view_vectors()` reconstructs a per-pixel world position and points the view vector from each surface toward it (see "View-vector reconstruction" below).
+**`ambient_temp`** (Kelvin) is now **used** by the emissive bands (`MWIR`/`LWIR`) as the baseline temperature proxy (`ambient_temp / _AMBIENT_REF_K`, ref 293 K). It is ignored by the reflective bands. The active reflective bands (`NIR_ACTIVE`/`SWIR_ACTIVE`) assume a **coaxial illuminator at the camera eye** (light shares the camera viewpoint) — there is no `camera_pos` / separate light-position input; the view direction doubles as the illumination direction (see "Coaxial illumination & view vector" below).
 
 ```python
-ir = camera.synthesize_ir("LWIR")                                    # thermal, ambient-dominated
-ir = camera.synthesize_ir("MWIR", ambient_temp=300.0)                # thermal, hot-biased
-ir = camera.synthesize_ir("NIR_ACTIVE", camera_pos=np.array([0,0,5]))# active reflective
-ir = camera.synthesize_ir("VIS")                                     # passive visible reflectance
+ir = camera.synthesize_ir("LWIR")                     # thermal, ambient-dominated
+ir = camera.synthesize_ir("MWIR", ambient_temp=300.0) # thermal, hot-biased
+ir = camera.synthesize_ir("NIR_ACTIVE")               # active reflective
+ir = camera.synthesize_ir("VIS")                      # passive visible reflectance
 ```
 
 ### Architecture: dispatch + per-band models
 
-`_compute_ir` computes the shared per-pixel terms once — `background`, NaN/Inf sanitization of every float buffer, the unit `normals`, the `view_vec` (from `_view_vectors()`, see below), and `dot_n_v` (clamped `N·V`) — then **dispatches by band** to a `_synth_<band>(...)` method. Each model returns a non-negative `(H,W)` map; the shared tail forces `background` → 0 and normalizes to `[0,1]`. **Edit a band by editing its `_synth_*` method**; tune cross-band weighting via the `_*_GAIN` / `_*_WEIGHT` constants near the top of the file. Shared building blocks: `_luma` (BT.601), `_gray` (flat channel mean), `_emissivity`, `_emissive_heat`, `_motion_heat`. To add a band: add a `SpectralBand` to `SPECTRAL_BANDS`, register buffers in `_BAND_BUFFERS`, add a `_synth_*` method + a dispatcher branch.
+`_compute_ir` computes the shared per-pixel terms once — `background`, **per-buffer resampling to the distance resolution** (`_resample_to`, see below), NaN/Inf sanitization of every float buffer, the unit `normals`, the fixed coaxial `view_vec` (`+Z`), and `dot_n_v` (clamped `N·V`) — then **dispatches by band** to a `_synth_<band>(...)` method. Each model returns a non-negative `(H,W)` map; the shared tail forces `background` → 0 and normalizes to `[0,1]`. **Edit a band by editing its `_synth_*` method**; tune cross-band weighting via the `_*_GAIN` / `_*_WEIGHT` constants near the top of the file. Shared building blocks: `_luma` (BT.601), `_gray` (flat channel mean), `_emissivity`, `_emissive_heat`, `_motion_heat`. To add a band: add a `SpectralBand` to `SPECTRAL_BANDS`, register buffers in `_BAND_BUFFERS`, add a `_synth_*` method + a dispatcher branch.
 
 ### Reflective bands (illumination return)
 
@@ -108,15 +108,15 @@ Different physics → different buffers and math. Reflective bands see **illumin
 - **Why no `to_display` in the GUI:** the renderer's `distance_to_camera` buffer carries tiny per-pixel variation. `to_display`'s percentile stretch zooms into the local min↔max of whatever is in frame, so over a near-flat region it amplified that micro-variation to full-scale **TV static**. That percentile AGC was the noise source even after the explicit Gaussian noise was removed. Showing the already-normalized `[0,1]` output directly keeps a flat surface flat.
 - `SuperCamera.to_display(ir, low_pct=2, high_pct=98)` (percentile stretch) still exists for anyone who *wants* AGC downstream, but it is **no longer used by the GUI**. Do not reintroduce it into the capture path — it is what produced the static.
 
-### View-vector reconstruction (`camera_pos`)
+### Coaxial illumination & view vector
 
-`_view_vectors(distance, camera_pos, H, W)` produces the unit world-space view direction (surface → `camera_pos`) that feeds `dot_n_v`. When `camera_pos` is given, `_reconstruct_world_pos()` rebuilds per-pixel world positions from the `distance_to_camera` buffer + the camera prim's USD pose and pinhole intrinsics, then `view_vec = camera_pos − world_pos`. The reconstruction:
+The illuminator is assumed **coaxial with the camera** — the light source sits at the camera eye, so for the active reflective bands the view direction and the illumination direction are the same (`H = V`, hence `N·H = N·V`). `_compute_ir` therefore uses a **fixed `+Z` `view_vec`** for the `dot_n_v` (`N·V`) geometry term: no `camera_pos` argument, no per-pixel world-position reconstruction, no camera-pose / intrinsics reads. This is the single, simple model used by every band.
 
-- Reads the camera prim's **local-to-world transform** via `UsdGeom.Xformable.ComputeLocalToWorldTransform` and its **focal length / aperture** via `UsdGeom.Camera` — **stable USD APIs only**, no `omni.isaac.sensor.Camera`, so it stays viewport-safe.
-- Builds camera-space pinhole rays (`u`/`v` across the apertures, local `−Z` forward), rotates them to world by the matrix's 3×3 (row-vector convention: `v_world = v_local · M`), and scales by Euclidean `distance`.
-- **Falls back to the fixed `+Z` view vector** when `camera_pos is None`, in mock mode, or if the prim / intrinsics are unavailable — so it never crashes, it just reverts to the old behaviour.
+There used to be a `camera_pos` parameter that reconstructed per-pixel world positions (`_view_vectors` / `_reconstruct_world_pos`) so the illuminator could sit anywhere; that path was **removed**. It added complexity for a feature that was never needed (the light is always taken to be at the camera) and was a source of shape bugs. If you ever want an off-axis illuminator again, reintroduce a per-pixel view-vector field — but keep it shape-locked to the distance buffer's `(H,W)`.
 
-Convention caveat: assumes a standard USD camera (looks down local `−Z`, `+X` right, `+Y` up, image row 0 = top). If active-band shading looks mirrored, flip the `u`/`v` sign in `_reconstruct_world_pos`. Since `distance` was already `nan_to_num`'d, background pixels reconstruct at the camera origin (distance 0) and are masked out of the output anyway.
+### AOV resolution harmonization (`_resample_to`)
+
+Different render AOVs can come back at **different resolutions** in the same frame — most commonly the PBR material AOVs (`DiffuseAlbedo`/`SpecularAlbedo`/`Roughness`/`EmissionAndForegroundMask`) at the renderer's internal **render resolution** while `distance_to_camera` / `normals` are at the **upscaled output resolution** (DLSS/TAA upscaling). Mixing them in the per-pixel math raised `operands could not be broadcast together with shapes (360,640) (720,1280)`. `_compute_ir` now resamples **every** pixel buffer to the distance buffer's `(H,W)` via `_resample_to` (nearest-neighbour, integer index map, no SciPy) before any synthesis. The distance buffer defines the output size and the `background` mask, so everything is harmonized to it; a buffer already at `(H,W)` passes through untouched, and non-array / sub-2-D values are left alone.
 
 ## Capture pipeline & runtime rules
 
@@ -221,7 +221,7 @@ The four PBR material AOVs use **CamelCase** annotator names on Kit 107.x; lower
 1. Add a `SpectralBand` entry to `SPECTRAL_BANDS` in `buffers.py` (`name`, `wavelength_min_nm`, `wavelength_max_nm`, `reflective_vs_emissive` = `REFLECTIVE`/`EMISSIVE`, `description`). This is the single source of truth — the GUI dropdown, `_resolve_band`, and the docs all read it.
 2. Register the buffers the band needs in `_BAND_BUFFERS` in `super_camera.py` (reuse `_REFLECTIVE_BUFFERS` / `_EMISSIVE_BUFFERS` or define a new list). `DISTANCE_TO_OBJECT` + `NORMALS` are always required.
 3. Add a `_synth_<band>(self, bufs, dot_n_v[, ambient_temp])` method returning a non-negative `(H,W)` map, and a branch in the `_compute_ir` dispatcher. Reuse the shared helpers (`_luma`, `_gray`, `_emissivity`, `_emissive_heat`, `_motion_heat`).
-4. If the GUI should treat it as an active-illuminator band (camera-position field), add its name to `_ACTIVE_BANDS` in `extension.py`. Emissive bands automatically get the ambient-temp field via `reflective_vs_emissive`.
+4. If the GUI should treat it as an active-illuminator band (shows the coaxial camera-eye light note), add its name to `_ACTIVE_BANDS` in `extension.py`. Emissive bands automatically get the ambient-temp field via `reflective_vs_emissive`.
 5. Sync root copies with extension copies.
 
 ## GUI panel (extension.py)
@@ -233,7 +233,7 @@ When the extension loads, a **"Super Camera"** window appears automatically in t
 | Camera Setup | Prim Path (default `/World/SuperCamera`), Width × Height, **Create Camera**, **Open Viewport** |
 | Spectral Band | Band dropdown (`VIS` / `NIR_ACTIVE` / `SWIR_ACTIVE` / `MWIR` / `LWIR`, built from `SPECTRAL_BANDS`, default `LWIR`) + a live `_band_desc` label showing the wavelength range and reflective/emissive description; relevant fields enabled, others greyed |
 | Ambient Temp (K) | Baseline temperature for the **emissive** bands (`MWIR`/`LWIR`), default 293 K — greyed for reflective bands |
-| Camera Position XYZ | World-space illuminator origin for the **active** bands (`NIR_ACTIVE`/`SWIR_ACTIVE`) — greyed otherwise |
+| Coaxial-light note | A read-only label shown for the **active** bands (`NIR_ACTIVE`/`SWIR_ACTIVE`) stating the light source is located at the camera eye — greyed otherwise. No XYZ input (the old Camera Position fields were removed) |
 | IR Preview | Live ironbow (thermal) thumbnail updated after each capture (320×180, RGBA ByteImageProvider) |
 | Output | Save Path — where the RGB PNG (or PPM fallback) is written |
 | Buttons | **Capture IR Frame** — runs one frame; **Reset Camera** — destroys camera object and closes viewport |
@@ -241,11 +241,11 @@ When the extension loads, a **"Super Camera"** window appears automatically in t
 **Behaviour:**
 - **Create Camera** — immediately creates the USD Camera prim at the given prim path and wires up the render product. The prim appears in the stage hierarchy and behaves as a standard Omniverse camera.
 - **Open Viewport** — calls `omni.kit.viewport.utility.create_viewport_window()` to open a docked viewport window showing the live camera view. Sets the active camera via `viewport_api.camera_path` (falls back to `set_active_camera()` if needed). Creates the camera first if it doesn't exist yet.
-- **Capture IR Frame** — synthesizes the selected band (`band = _BAND_NAMES[self._mode_idx]`), colorizes it with the ironbow palette (`SuperCamera.colorize`), updates the IR Preview thumbnail, and saves the file. `camera_pos` is passed only for the active bands (`_ACTIVE_BANDS`); `ambient_temp` is always passed (the model ignores it for reflective bands).
+- **Capture IR Frame** — synthesizes the selected band (`band = _BAND_NAMES[self._mode_idx]`), colorizes it with the ironbow palette (`SuperCamera.colorize`), updates the IR Preview thumbnail, and saves the file. `ambient_temp` is always passed (the model ignores it for reflective bands); there is no `camera_pos` (active bands use the coaxial camera-eye illuminator).
 - If prim path or resolution changes between operations, the old camera is destroyed and a new one is created automatically.
 - Output is an **RGB** (ironbow) PNG via Pillow; falls back to **PPM** (`P6`) if Pillow is unavailable in the Isaac Sim Python env. `_update_preview` / `_save_ir` both take a uint8 `(H,W,3)` RGB array.
 - Status line updates after every action or error.
-- `_on_mode_changed` is called immediately after UI build so the correct fields are greyed (and `_band_desc` populated) from the start. It enables Ambient Temp for emissive bands (`reflective_vs_emissive == EMISSIVE`) and Camera Position for `_ACTIVE_BANDS`.
+- `_on_mode_changed` is called immediately after UI build so the correct fields are greyed (and `_band_desc` populated) from the start. It enables Ambient Temp for emissive bands (`reflective_vs_emissive == EMISSIVE`) and the coaxial-light note for `_ACTIVE_BANDS`.
 
 ## Extension discovery (critical)
 

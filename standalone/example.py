@@ -18,7 +18,6 @@ from isaacsim import SimulationApp
 
 app = SimulationApp({"headless": True})
 
-import numpy as np
 from PIL import Image
 from super.camera import SuperCamera, BufferType
 
@@ -67,11 +66,10 @@ print(f"Depth image saved: {img.shape} {img.dtype}")
 # 2) One IR frame per spectral band → ironbow (thermal-camera) palette.
 #    synthesize_ir returns a float32 (H,W) map in [0,1]; colorize() maps it to a
 #    uint8 (H,W,3) RGB image for display. Keep the float map for training.
-#    camera_pos feeds the active illuminator used by the NIR/SWIR bands; the
-#    emissive bands (MWIR/LWIR) read ambient_temp instead.
-camera_pos = np.array([0.0, -5.0, 2.0])
+#    The active bands (NIR/SWIR) assume a coaxial illuminator at the camera eye;
+#    the emissive bands (MWIR/LWIR) read ambient_temp instead.
 for band in ("VIS", "NIR_ACTIVE", "SWIR_ACTIVE", "MWIR", "LWIR"):
-    ir = camera.synthesize_ir(band, camera_pos=camera_pos, ambient_temp=293.0)
+    ir = camera.synthesize_ir(band, ambient_temp=293.0)
     Image.fromarray(SuperCamera.colorize(ir, "ironbow")).save(f"ir_{band}.png")
     print(f"{band:12s} IR saved: {ir.shape} {ir.dtype}")
 

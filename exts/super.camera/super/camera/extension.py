@@ -240,16 +240,34 @@ class SuperCameraExtension(omni.ext.IExt):
                     width=w // 2,
                     height=h // 2,
                 )
-            vp_api = self._viewport_window.viewport_api
-            try:
-                vp_api.camera_path = prim_path
-            except AttributeError:
-                vp_api.set_active_camera(prim_path)
             self._viewport_window.visible = True
+            asyncio.ensure_future(self._assign_viewport_camera(prim_path))
             self._status_label.text = "Viewport opened."
         except Exception as exc:
             self._status_label.text = f"Error: {exc}"
             carb.log_error(f"[super.camera] Viewport open failed: {exc}")
+
+    async def _assign_viewport_camera(self, prim_path):
+        app = omni.kit.app.get_app()
+        for _ in range(20):
+            await app.next_update_async()
+            window = self._viewport_window
+            if window is None:
+                return
+            vp_api = getattr(window, "viewport_api", None)
+            if vp_api is None:
+                continue
+            try:
+                try:
+                    vp_api.camera_path = prim_path
+                except AttributeError:
+                    vp_api.set_active_camera(prim_path)
+                return
+            except Exception:
+                continue
+        carb.log_warn(
+            f"[super.camera] could not set viewport camera to {prim_path}"
+        )
 
     def _on_mode_changed(self, model, _item):
         try:

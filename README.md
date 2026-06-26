@@ -1,6 +1,6 @@
 # Super Camera
 
-Simulated infrared imagery for NVIDIA Isaac Sim / Omniverse.
+Attempt to simulate infrared imagery for NVIDIA Isaac Sim / Omniverse.
 
 This is an attempt, not a finished sensor model. It takes the buffers Isaac Sim
 already renders (distance, normals, albedo, roughness, emissive, motion) and turns

@@ -121,6 +121,9 @@ ir = camera.synthesize_ir("VIS")                      # visible reflectance
 The old names `thermal` (→ `LWIR`) and `active_nir` (→ `NIR_ACTIVE`) still work but
 are deprecated and print a one-time notice.
 
+## Effect of light sources in the scene
+The lights you place in the Isaac Sim stage (point lights, distant/sun lights, dome lighting, area emitters) do not currently drive any of SuperCamera's synthetic IR bands, because each band builds its own illumination model from per-buffer material and geometry data rather than from the rendered, lit image. The reflective bands (VIS, NIR_ACTIVE, SWIR_ACTIVE) read the unlit PBR material AOVs — diffuse albedo, specular albedo, and roughness — which describe how a surface would reflect light, not how much light is actually reaching it; the active bands then assume a single illuminator sitting at the camera eye (coaxial) and shade by N·V, while VIS uses N·V as a flat ambient proxy. The emissive bands (MWIR, LWIR) ignore visible illumination entirely and instead model thermal self-emission, where brightness comes from a surface's emissivity and an estimated temperature (ambient baseline plus emissive-material and motion heat) — which is physically correct, since long- and mid-wave IR radiance is governed by how hot an object is, not by the visible lights shining on it. The practical consequence is that moving, dimming, or recoloring a stage light changes the regular RGB render but leaves every IR frame unchanged; to make the reflective bands respond to real scene lighting you would need to fold in the lit RGB beauty pass or a lighting/irradiance AOV instead of relying solely on the albedo AOVs.
+
 ## Colormap
 
 ```python

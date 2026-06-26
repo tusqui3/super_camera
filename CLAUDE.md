@@ -93,8 +93,10 @@ ir = camera.synthesize_ir("VIS")                      # passive visible reflecta
 
 ### Emissive bands (thermal emission)
 
-- **`MWIR` (3000–5000 nm):** `ir = ε · T⁴`. `ε = _emissivity()` (rough/diffuse → high, smooth/specular → low). `T = ambient + _MWIR_EMISSIVE_GAIN·emissive_heat + _MWIR_MOTION_GAIN·motion_heat`. The `T⁴` power **biases hard toward hot objects**; cool ambient stays dim. Emission is ~isotropic → **no geometry term** (`_synth_mwir` takes no `dot_n_v`).
-- **`LWIR` (8000–14000 nm):** `ir = ε · T · geom`. Near-**linear** in temperature so the whole scene glows; `T = ambient + _LWIR_EMISSIVE_GAIN·emissive_heat + _LWIR_MOTION_GAIN·motion_heat`; `geom = (1−_LWIR_GEOMETRY_WEIGHT) + _LWIR_GEOMETRY_WEIGHT·N·V` (weak geometry). **No** inverse-square falloff (emitted, not illuminated).
+- **`MWIR` (3000–5000 nm):** `ir = ε · T⁴ · τ`. `ε = _emissivity()` (rough/diffuse → high, smooth/specular → low). `T = ambient + _MWIR_EMISSIVE_GAIN·emissive_heat + _MWIR_MOTION_GAIN·motion_heat`. The `T⁴` power **biases hard toward hot objects**; cool ambient stays dim. Emission is ~isotropic → **no geometry term** (`_synth_mwir` takes no `dot_n_v`).
+- **`LWIR` (8000–14000 nm):** `ir = ε · T · geom · τ`. Near-**linear** in temperature so the whole scene glows; `T = ambient + _LWIR_EMISSIVE_GAIN·emissive_heat + _LWIR_MOTION_GAIN·motion_heat`; `geom = (1−_LWIR_GEOMETRY_WEIGHT) + _LWIR_GEOMETRY_WEIGHT·N·V` (weak geometry). **No** inverse-square falloff (emitted, not illuminated).
+
+Both emissive bands multiply by an **atmospheric transmittance** `τ = _atmospheric_transmittance() = exp(−_ATMOSPHERIC_EXTINCTION · distance)` (Beer–Lambert; `DISTANCE_TO_OBJECT`, metres). `_ATMOSPHERIC_EXTINCTION` (default `0.02`/m) is **small on purpose** — it dims radiance only gradually with range so distant surfaces fade instead of all saturating to one colour, giving the background a depth gradient. This is the fix for "MWIR/LWIR too saturated, background not distinguishable": **raise** `_ATMOSPHERIC_EXTINCTION` for stronger near/far contrast, lower it toward `0` to disable. It applies **only to the emissive bands** — the reflective active bands already attenuate via inverse-square `1/d²`.
 
 `_emissivity()` = `clip(0.5 + 0.5·roughness − 0.4·gray(specular), 0.05, 1.0)`. `_emissive_heat()` = `gray(EMISSIVE)` (0 if unattached). `_motion_heat()` = `clip(|motion_xy| / _MOTION_SCALE, 0, 1)` (0 if unattached).
 

@@ -14,7 +14,7 @@ It runs two ways: as an Isaac Sim extension with a GUI panel, and as a standalon
 Python library you can drop into a loop like Isaac Lab.
 
 <p align="center">
-  <img src="docs/images/super_camera_ir.png" alt="LWIR output, ironbow palette" width="80%">
+  <img src="docs/images/lwirnolight.png" alt="LWIR output, ironbow palette" width="80%">
   <br><em>LWIR output with the ironbow palette.</em>
 </p>
 

@@ -461,14 +461,14 @@ class SuperCamera:
         # colorize().
         out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out[background] = 0.0
-        # Robust white point: scale by the 97th percentile of the valid (non-miss)
+        # Robust white point: scale by the 99th percentile of the valid (non-miss)
         # pixels instead of the true max, so a few outlier-bright pixels (specular
         # glints, T^4 hot spots, near-camera 1/d^2 spikes) saturate to white rather
-        # than crushing the whole frame dark. The brightest ~3% clip — like real
+        # than crushing the whole frame dark. The brightest ~1% clip — like real
         # sensor well saturation — while black stays pinned at 0 (no floor stretch,
         # so flat surfaces stay flat and the percentile-AGC static does not return).
         valid = out[~background]
-        scale = float(np.percentile(valid, 97.0)) if valid.size else 0.0
+        scale = float(np.percentile(valid, 99.0)) if valid.size else 0.0
         if scale > 0.0:
             out = np.clip(out / scale, 0.0, 1.0)
 

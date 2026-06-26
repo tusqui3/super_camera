@@ -1,14 +1,14 @@
 # Super Camera
 
-Attempt to simulate infrared imagery for NVIDIA Isaac Sim / Omniverse.
+Super Camera is an experimental project that simulates infrared (IR) imagery in NVIDIA Isaac Sim / Omniverse.
 
-This is an attempt, not a finished sensor model. It takes the buffers Isaac Sim
-already renders (distance, normals, albedo, roughness, emissive, motion) and turns
-them into IR-looking images for five spectral bands. The results are **far from
-physically accurate** — there is no calibrated radiometry behind them, just simple
-per-band heuristics that produce something that *looks* like the part of the
-spectrum it is meant to represent. Treat the output as a rough stand-in, useful for
-prototyping and as a starting point, not as ground truth.
+There is currently a lack of practical tools for generating infrared imagery in virtual environments for robotics. This is an important capability because many real-world robots rely on infrared cameras for perception, yet most simulation platforms only provide standard RGB rendering.
+
+This project aims to bridge that gap by leveraging the per-ray (per-pixel) buffers already produced by Isaac Sim. Instead of performing physically accurate thermal rendering, it applies a set of heuristics to the available rendering buffers—such as depth, normals, albedo, roughness, emissive information, and motion—to synthesize infrared-like images. The output radiance is normalized between 0 and 1.
+
+While it is not possible to recover physically meaningful radiometric values (e.g., W/m²·sr) from the available rendering information alone, carefully designed heuristics can produce images that approximate the visual appearance of different infrared bands. The goal is not to model thermal physics, but to provide realistic-looking infrared imagery suitable for algorithm development, prototyping, and synthetic data generation.
+
+This is an experimental sensor model rather than a finished or validated simulation. There is no calibrated radiometric model behind the generated images, and the results should not be treated as physically accurate or as ground truth. Instead, they should be viewed as a practical approximation and a foundation for future improvements.
 
 It runs two ways: as an Isaac Sim extension with a GUI panel, and as a standalone
 Python library you can drop into a loop like Isaac Lab.

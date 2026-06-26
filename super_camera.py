@@ -97,6 +97,12 @@ _MWIR_MOTION_GAIN = 2.0         # MWIR weight on motion-derived heat
 _LWIR_EMISSIVE_GAIN = 1.0       # LWIR weight on emissive-material heat
 _LWIR_MOTION_GAIN = 0.5         # LWIR weight on motion-derived heat
 _LWIR_GEOMETRY_WEIGHT = 0.15    # LWIR weak geometry (N·V) influence
+_ATMOSPHERIC_EXTINCTION = 0.02  # Beer–Lambert extinction coeff (1/m) for the
+                                # emissive bands. Small on purpose: radiance is
+                                # attenuated by exp(-σ·distance), so it dims only
+                                # gradually with range. This gives the otherwise
+                                # flat, percentile-saturated background a depth
+                                # gradient so distant surfaces stay distinguishable.
 
 _DEPRECATION_NOTIFIED: set = set()
 
@@ -561,6 +567,20 @@ class SuperCamera:
             return np.clip(mag / _MOTION_SCALE, 0.0, 1.0)
         return 0.0
 
+    @staticmethod
+    def _atmospheric_transmittance(bufs: Dict[str, np.ndarray]) -> np.ndarray:
+        # Beer–Lambert path transmittance for the emissive bands: a small fraction
+        # of the emitted radiance is absorbed/scattered by the atmosphere on the
+        # way to the camera, so a surface's apparent radiance is multiplied by
+        # exp(-σ · distance). With the small _ATMOSPHERIC_EXTINCTION this only
+        # "reduces a bit" the radiance as range grows, but it breaks the flat,
+        # saturated background into a depth gradient (near surfaces stay bright,
+        # far surfaces fade) so distant geometry stays distinguishable. Miss /
+        # background pixels (non-finite distance) are already forced to 0 by the
+        # mask in _compute_ir, so the clip-to-0 floor here is just a guard.
+        distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.0, None)
+        return np.exp(-_ATMOSPHERIC_EXTINCTION * distance)
+
     # ── Buffer geometry ─────────────────────────────────────────────────────
 
     @staticmethod
@@ -625,12 +645,14 @@ class SuperCamera:
         # ambient baseline plus strongly-weighted emissive-material and motion
         # heat. The T^4 power biases hard toward the hottest objects (engines,
         # exhausts) — cool ambient surfaces stay dim. Emission is ~isotropic, so
-        # (unlike LWIR) there is no geometry term at all.
+        # (unlike LWIR) there is no geometry term at all. A small Beer–Lambert
+        # atmospheric transmittance then dims the radiance with range so the
+        # background reads as a depth gradient instead of one saturated colour.
         emissivity = self._emissivity(bufs)
         ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
         temp = ambient + _MWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
             + _MWIR_MOTION_GAIN * self._motion_heat(bufs)
-        return emissivity * (temp ** 4)
+        return emissivity * (temp ** 4) * self._atmospheric_transmittance(bufs)
 
     def _synth_lwir(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray, ambient_temp: float) -> np.ndarray:
         # LWIR (8000–14000 nm, emissive). Ambient-temperature thermal emission:
@@ -639,12 +661,14 @@ class SuperCamera:
         # temperature (so the whole scene is visible, not just hot spots),
         # geometry has only a weak influence, and there is NO inverse-square
         # falloff because this is emitted — not actively illuminated — radiation.
+        # A small Beer–Lambert atmospheric transmittance still dims the radiance
+        # with range, giving the otherwise uniform background a depth gradient.
         emissivity = self._emissivity(bufs)
         ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
         temp = ambient + _LWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
             + _LWIR_MOTION_GAIN * self._motion_heat(bufs)
         geometry = (1.0 - _LWIR_GEOMETRY_WEIGHT) + _LWIR_GEOMETRY_WEIGHT * dot_n_v
-        return emissivity * temp * geometry
+        return emissivity * temp * geometry * self._atmospheric_transmittance(bufs)
 
     @staticmethod
     def to_display(ir: np.ndarray, low_pct: float = 2.0, high_pct: float = 98.0) -> np.ndarray:

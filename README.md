@@ -36,7 +36,7 @@ palette, so brighter (yellow/white) means more signal.
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/super_camera.git
+git clone https://github.com/tusqui3/super_camera.git
 ```
 
 **As an Isaac Sim extension:** in Isaac Sim open

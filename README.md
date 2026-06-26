@@ -25,7 +25,7 @@ palette, so brighter (yellow/white) means more signal.
 
 | VIS | NIR_ACTIVE | SWIR_ACTIVE |
 |---|---|---|
-| ![vis](docs/images/visnolight.png) | ![nir](docs/images/niranolight.png) | ![swir](docs/images/swirnolight.png) |
+| ![vis](docs/images/visnolight.png) | ![nir](docs/images/nirnolight.png) | ![swir](docs/images/swirnolight.png) |
 | 400–700 nm, reflective | 700–1000 nm, reflective | 1000–2500 nm, reflective |
 
 | MWIR | LWIR |

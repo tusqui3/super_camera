@@ -456,13 +456,21 @@ class SuperCamera:
 
         out = np.maximum(ir_intensity, 0.0).astype(np.float32)
         # Final guard: any inf/nan a synth model produced (e.g. an overflowed
-        # specular multiply) becomes 0 here, so it can't poison out.max() (which
-        # would collapse the whole-frame normalization) or leak into colorize().
+        # specular multiply) becomes 0 here, so it can't poison the white-point
+        # percentile (which would collapse the whole-frame scale) or leak into
+        # colorize().
         out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out[background] = 0.0
-        omax = float(out.max())
-        if omax > 0.0:
-            out = out / omax
+        # Robust white point: scale by the 97th percentile of the valid (non-miss)
+        # pixels instead of the true max, so a few outlier-bright pixels (specular
+        # glints, T^4 hot spots, near-camera 1/d^2 spikes) saturate to white rather
+        # than crushing the whole frame dark. The brightest ~3% clip — like real
+        # sensor well saturation — while black stays pinned at 0 (no floor stretch,
+        # so flat surfaces stay flat and the percentile-AGC static does not return).
+        valid = out[~background]
+        scale = float(np.percentile(valid, 97.0)) if valid.size else 0.0
+        if scale > 0.0:
+            out = np.clip(out / scale, 0.0, 1.0)
 
         return out
 

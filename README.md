@@ -1,6 +1,6 @@
 # Super Camera
 
-Super Camera is an experimental project that tries to emulate infrared (IR) imagery in NVIDIA Isaac Sim / Omniverse. The generated infrared images are an approximation and are not be completely representative of real-world IR camera output, so treat them as a helpful starting point for future projects rather than a perfect match to reality.
+Super Camera is an experimental project that tries to emulate infrared (IR) imagery in NVIDIA Isaac Sim / Omniverse. The generated infrared images are an approximation and are **not completely representative of real-world IR camera output**, so treat them as a helpful starting point for future projects rather than a perfect match to reality.
 
 There is currently a lack of practical tools for generating infrared imagery in virtual environments for robotics. This is an important capability because many real-world robots rely on infrared cameras for perception, yet most simulation platforms only provide standard RGB rendering.
 

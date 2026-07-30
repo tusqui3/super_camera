@@ -97,6 +97,7 @@ _MWIR_MOTION_GAIN = 2.0         # MWIR weight on motion-derived heat
 _LWIR_EMISSIVE_GAIN = 1.0       # LWIR weight on emissive-material heat
 _LWIR_MOTION_GAIN = 0.5         # LWIR weight on motion-derived heat
 _LWIR_GEOMETRY_WEIGHT = 0.15    # LWIR weak geometry (N·V) influence
+_LWIR_GRAZING_EMISSIVITY_WEIGHT = 0.3  # LWIR emissivity drop at grazing angles (edge darkening)
 _ATMOSPHERIC_EXTINCTION = 0.02  # Beer–Lambert extinction coeff (1/m) for the
                                 # emissive bands. Small on purpose: radiance is
                                 # attenuated by exp(-σ·distance), so it dims only
@@ -664,6 +665,12 @@ class SuperCamera:
         # A small Beer–Lambert atmospheric transmittance still dims the radiance
         # with range, giving the otherwise uniform background a depth gradient.
         emissivity = self._emissivity(bufs)
+        # Grazing-angle darkening: real thermal footage shows emissivity (and thus
+        # apparent temperature) dropping toward silhouette edges even on diffuse
+        # surfaces. Local to LWIR only — does not touch the shared _emissivity()
+        # helper (MWIR stays isotropic, per its own model) or the separate weak
+        # `geometry` radiance term below.
+        emissivity = emissivity * (1.0 - _LWIR_GRAZING_EMISSIVITY_WEIGHT * (1.0 - dot_n_v))
         ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
         temp = ambient + _LWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
             + _LWIR_MOTION_GAIN * self._motion_heat(bufs)

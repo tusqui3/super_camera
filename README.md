@@ -290,4 +290,21 @@ super_camera/
 - Python 3.10+
 - `numpy`, plus `Pillow` for PNG output
 
+## Thermal (MWIR/LWIR) model, first principles
+
+The radiance a thermal camera receives from a surface is, in general:
+
+```
+L = τ · (ε · L_emit + (1 − ε) · L_indirect)
+```
+
+- `τ` — atmospheric transmittance along the path (Beer–Lambert, `exp(-extinction · distance)`).
+- `ε` — surface emissivity, `[0,1]`.
+- `L_emit` — radiance the surface emits by virtue of its own temperature (Planck law; `T⁴` for MWIR's band-integrated response, ~linear in `T` for LWIR).
+- `L_indirect` — radiance arriving from the environment and reflected off the surface (the `(1-ε)` term, Kirchhoff's law: a poor emitter is a good reflector).
+
+**This codebase's scenario is kept isothermal** — the whole scene assumed at one constant ambient temperature (`ambient_temp`, default 293 K / ~300 K) with no per-pixel ground-truth temperature map available from the renderer. Under that assumption `L_indirect ≈ L_emit` (the reflected environment radiance comes from surfaces at the same temperature), so `ε · L_emit + (1-ε) · L_indirect ≈ L_emit` regardless of `ε` — emissivity contrast would physically **cancel out**, and a true isothermal scene should render flat.
+
+`_synth_mwir` / `_synth_lwir` deliberately do **not** implement this cancellation — there is no `L_indirect` term at all, only `ε · L_emit^n · τ` (`n=4` MWIR, `n=1` LWIR-ish). That is a **stylistic choice**, not a physical model: it keeps material contrast (rough/diffuse bright, smooth/metallic dark) visible in the rendered IR frame, which is what makes it read as a thermal image, at the cost of not being radiometrically correct for a truly isothermal scene. See `CLAUDE.md` for the full per-band equations and tuning constants.
+
 Mock mode only needs `numpy`.

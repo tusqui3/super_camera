@@ -457,7 +457,7 @@ class SuperCamera:
         elif band == "SWIR_ACTIVE":
             ir_intensity = self._synth_swir_active(bufs, dot_n_v)
         elif band == "MWIR":
-            ir_intensity = self._synth_mwir(bufs, ambient_temp)
+            ir_intensity = self._synth_mwir(bufs, dot_n_v, ambient_temp)
         else:  # LWIR
             ir_intensity = self._synth_lwir(bufs, dot_n_v, ambient_temp)
 
@@ -640,7 +640,7 @@ class SuperCamera:
         distance = np.clip(bufs["DISTANCE_TO_OBJECT"], 0.1, 100.0)
         return reflection / (distance ** 2)
 
-    def _synth_mwir(self, bufs: Dict[str, np.ndarray], ambient_temp: float) -> np.ndarray:
+    def _synth_mwir(self, bufs: Dict[str, np.ndarray], dot_n_v: np.ndarray, ambient_temp: float) -> np.ndarray:
         # MWIR (3000–5000 nm, emissive). Thermal emission with a steep response.
         # Radiance ≈ emissivity · T_proxy^4 where the temperature proxy is the
         # ambient baseline plus strongly-weighted emissive-material and motion
@@ -650,6 +650,7 @@ class SuperCamera:
         # atmospheric transmittance then dims the radiance with range so the
         # background reads as a depth gradient instead of one saturated colour.
         emissivity = self._emissivity(bufs)
+        emissivity = emissivity * (1.0 - _LWIR_GRAZING_EMISSIVITY_WEIGHT * (1.0 - dot_n_v))
         ambient = max(ambient_temp, 1.0) / _AMBIENT_REF_K
         temp = ambient + _MWIR_EMISSIVE_GAIN * self._emissive_heat(bufs) \
             + _MWIR_MOTION_GAIN * self._motion_heat(bufs)

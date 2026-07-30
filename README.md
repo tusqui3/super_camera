@@ -1,10 +1,17 @@
 # Super Camera
 
-Super Camera synthesizes infrared imagery in NVIDIA Isaac Sim / Omniverse. Most sim platforms only give you RGB, but a lot of real robots rely on IR for perception — this fills that gap using the per-pixel buffers Isaac Sim already renders (depth, normals, albedo, roughness, emissive, motion), instead of doing physically accurate thermal rendering.
+Super Camera is an experimental project that tries to emulate infrared (IR) imagery in NVIDIA Isaac Sim / Omniverse. The generated infrared images are an approximation and are **not completely representative of real-world IR camera output**, so treat them as a helpful starting point for future projects rather than a perfect match to reality.
 
-It's heuristic, not radiometric: there's no calibrated W/m²·sr model behind it, and the scene is treated as isothermal (one ambient temperature, no per-pixel ground-truth temperature map). Under that assumption a truly physical thermal model would render flat — emissivity contrast should cancel against reflected ambient radiance (Kirchhoff's law). Super Camera skips that cancellation on purpose, keeping `ε · L_emit^n · τ` only, because material contrast (rough/diffuse bright, smooth/metallic dark) is what makes the image *read* as thermal. So treat the output as good-looking, plausible-feeling IR for algorithm development and synthetic data — not ground truth. Scene lights also don't factor in: each band builds its own illumination model from material/geometry buffers rather than the lit render, so moving a light changes the RGB view but not the IR one (see "Spectral bands" below for why).
+There is currently a lack of practical tools for generating infrared imagery in virtual environments for robotics. This is an important capability because many real-world robots rely on infrared cameras for perception, yet most simulation platforms only provide standard RGB rendering.
 
-It runs two ways: as an Isaac Sim extension with a GUI panel, and as a standalone Python library you can drop into a loop like Isaac Lab.
+This project aims to bridge that gap by leveraging the per-ray (per-pixel) buffers already produced by Isaac Sim. Instead of performing physically accurate thermal rendering, it applies a set of heuristics to the available rendering buffers—such as depth, normals, albedo, roughness, emissive information, and motion—to synthesize infrared-like images. The output radiance is normalized between 0 and 1.
+
+While it is not possible to recover physically meaningful radiometric values (e.g., W/m²·sr) from the available rendering information alone, carefully designed heuristics can produce images that approximate the visual appearance of different infrared bands. The goal is not to model thermal physics, but to provide realistic-looking infrared imagery suitable for algorithm development, prototyping, and synthetic data generation.
+
+This is an experimental sensor model rather than a finished or validated simulation. There is no calibrated radiometric model behind the generated images, and the results should not be treated as physically accurate or as ground truth. Instead, they should be viewed as a practical approximation and a foundation for future improvements.
+
+It runs two ways: as an Isaac Sim extension with a GUI panel, and as a standalone
+Python library you can drop into a loop like Isaac Lab.
 
 <p align="center">
   <img src="docs/images/lwirnolight.png" alt="LWIR output, ironbow palette" width="80%">
@@ -100,13 +107,6 @@ So a smooth metal plate glints in the active bands but stays dark in LWIR (low
 emissivity), a warm matte object barely shows under active NIR but is bright in
 LWIR, and only something genuinely hot or moving stands out in MWIR.
 
-This split is why scene lights don't touch the IR output: reflective bands read
-unlit material AOVs (diffuse/specular albedo, roughness) and shade them with a
-coaxial camera-eye light, while emissive bands ignore visible light entirely and
-model thermal self-emission instead. To make the reflective bands respond to real
-scene lighting you'd need to feed in the lit RGB pass or an irradiance AOV instead
-of the raw albedo AOVs.
-
 `ambient_temp` (Kelvin) only affects the emissive bands. The canonical definitions
 live in `SPECTRAL_BANDS` in
 [`buffers.py`](exts/super.camera/super/camera/buffers.py).
@@ -120,6 +120,9 @@ ir = camera.synthesize_ir("VIS")                      # visible reflectance
 
 The old names `thermal` (→ `LWIR`) and `active_nir` (→ `NIR_ACTIVE`) still work but
 are deprecated and print a one-time notice.
+
+## Effect of light sources in the scene
+The lights you place in the Isaac Sim stage (point lights, distant/sun lights, dome lighting, area emitters) do not currently drive any of SuperCamera's synthetic IR bands, because each band builds its own illumination model from per-buffer material and geometry data rather than from the rendered, lit image. The reflective bands (VIS, NIR_ACTIVE, SWIR_ACTIVE) read the unlit PBR material AOVs — diffuse albedo, specular albedo, and roughness — which describe how a surface would reflect light, not how much light is actually reaching it; the active bands then assume a single illuminator sitting at the camera eye (coaxial) and shade by N·V, while VIS uses N·V as a flat ambient proxy. The emissive bands (MWIR, LWIR) ignore visible illumination entirely and instead model thermal self-emission, where brightness comes from a surface's emissivity and an estimated temperature (ambient baseline plus emissive-material and motion heat) — which is physically correct, since long- and mid-wave IR radiance is governed by how hot an object is, not by the visible lights shining on it. The practical consequence is that moving, dimming, or recoloring a stage light changes the regular RGB render but leaves every IR frame unchanged; to make the reflective bands respond to real scene lighting you would need to fold in the lit RGB beauty pass or a lighting/irradiance AOV instead of relying solely on the albedo AOVs.
 
 ## Colormap
 
@@ -286,3 +289,22 @@ super_camera/
 - NVIDIA Isaac Sim 4.x / Omniverse Kit 106.x for live capture
 - Python 3.10+
 - `numpy`, plus `Pillow` for PNG output
+
+## Thermal (MWIR/LWIR) model, first principles
+
+The radiance a thermal camera receives from a surface is, in general:
+
+```
+L = τ · (ε · L_emit + (1 − ε) · L_indirect)
+```
+
+- `τ` — atmospheric transmittance along the path (Beer–Lambert, `exp(-extinction · distance)`).
+- `ε` — surface emissivity, `[0,1]`.
+- `L_emit` — radiance the surface emits by virtue of its own temperature (Planck law; `T⁴` for MWIR's band-integrated response, ~linear in `T` for LWIR).
+- `L_indirect` — radiance arriving from the environment and reflected off the surface (the `(1-ε)` term, Kirchhoff's law: a poor emitter is a good reflector).
+
+**This codebase's scenario is kept isothermal** — the whole scene assumed at one constant ambient temperature (`ambient_temp`, default 293 K / ~300 K) with no per-pixel ground-truth temperature map available from the renderer. Under that assumption `L_indirect ≈ L_emit` (the reflected environment radiance comes from surfaces at the same temperature), so `ε · L_emit + (1-ε) · L_indirect ≈ L_emit` regardless of `ε` — emissivity contrast would physically **cancel out**, and a true isothermal scene should render flat.
+
+`_synth_mwir` / `_synth_lwir` deliberately do **not** implement this cancellation — there is no `L_indirect` term at all, only `ε · L_emit^n · τ` (`n=4` MWIR, `n=1` LWIR-ish). That is a **stylistic choice**, not a physical model: it keeps material contrast (rough/diffuse bright, smooth/metallic dark) visible in the rendered IR frame, which is what makes it read as a thermal image, at the cost of not being radiometrically correct for a truly isothermal scene. See `CLAUDE.md` for the full per-band equations and tuning constants.
+
+Mock mode only needs `numpy`.
